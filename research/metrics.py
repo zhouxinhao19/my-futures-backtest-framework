@@ -27,7 +27,11 @@ def information_coefficient(frame: pd.DataFrame, factor: str = "factor", forward
     """按日 Spearman IC。"""
     rows = []
     for date, group in frame.dropna(subset=[factor, forward]).groupby("date"):
-        if len(group) < 3 or group[factor].nunique() < 2:
+        if (
+            len(group) < 3
+            or group[factor].nunique() < 2
+            or group[forward].nunique() < 2
+        ):
             continue
         rows.append((pd.Timestamp(date), float(group[factor].corr(group[forward], method="spearman"))))
     return pd.Series(dict(rows), dtype=float)

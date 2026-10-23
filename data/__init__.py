@@ -66,7 +66,7 @@ def symbol_spec(symbol: str) -> dict[str, Any]:
         return specs[key]
     alias = key if key.endswith("_MAIN") else f"{key}_MAIN"
     if alias in specs:
-        if product_key not in products:
+        if key.endswith("_MAIN") and product_key not in products:
             warnings.warn(
                 f"{alias} 是过渡别名，新代码请使用 products.{product_key}",
                 DeprecationWarning,
