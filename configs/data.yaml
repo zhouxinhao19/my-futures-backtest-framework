@@ -1,0 +1,41 @@
+mongo_uri: "mongodb://127.0.0.1:27017"
+mongo_db: "quantaxis_price_data"
+
+collections:
+  price_panel: "price_data_research"
+  volume_oi_panel: "price_data_research"
+  minute_bars: "future_5m"
+  member_position: "member_position_daily"
+  contract_full: "contract_day_full"
+  vendor_main_map: "vendor_main_map"
+
+protocol:
+  signal_price: "adj_close"
+  research_execution_price: "adj_settle"
+  account_execution_price: "settle"
+  account_mark_price: "settle"
+  signal_lag: 1
+  daily_annualization: 243
+  weekly_annualization: 52
+  # 样本外是该日及之后的交易日，样本内是更早的交易日。
+  oos_start: "2025-01-01"
+
+# 交易所合约代码前缀与品种名不同的历史别名（全合约 CSV 与 price_data_research 中观察到）。
+# valid_until 取自 load_data1.csv 中该前缀最后出现的交易日；超过该日期出现别名前缀即报错。
+code_prefix_aliases:
+  MA:
+    - prefix: "me"
+      valid_until: "2015-05-15"
+  ZC:
+    - prefix: "tc"
+      valid_until: "2016-04-08"
+
+main_rules:
+  contract_main: "etf_main"
+  research_price: "single_daily_contract"
+  volume_oi: "single_daily_contract"
+  vendor_main: "vendor_maincon"
+
+source_policy:
+  allow_fallback: false
+  close_settle_fallback_source: "close_fallback"

@@ -1,0 +1,4 @@
+slippage_ticks: 1
+slippage_pct_floor: 0.0002
+slippage_pct_ceiling: 0.01
+cash_yield: 0.0
