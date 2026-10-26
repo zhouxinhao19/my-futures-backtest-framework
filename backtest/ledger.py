@@ -163,6 +163,29 @@ def research_backtest(
     return ResearchResult(daily=daily, trades=trades, positions=positions)
 
 
+def _weight_values(weight: pd.DataFrame, dates: pd.Index, products: list) -> np.ndarray:
+    return (
+        weight.reindex(index=dates, columns=products)
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+        .to_numpy(float)
+    )
+
+
+def _apply_weight_budget(
+    values: np.ndarray,
+    valid: np.ndarray,
+    leg_notional: np.ndarray,
+    holding: int,
+) -> np.ndarray:
+    """腿内按信号绝对值分配名义金额。无效品种权重记为 0。"""
+    clipped = np.where(valid, np.clip(values, 0.0, None), 0.0)
+    total = clipped.sum(axis=1)
+    share = np.zeros_like(clipped)
+    np.divide(clipped, total[:, None], out=share, where=total[:, None] > 0)
+    return share * (leg_notional / holding)[:, None]
+
+
 def _weight_budget(
     weight: pd.DataFrame,
     dates: pd.Index,
@@ -172,12 +195,72 @@ def _weight_budget(
     holding: int,
 ) -> np.ndarray:
     """腿内按信号绝对值分配名义金额。无效品种权重记为 0。"""
-    values = weight.reindex(index=dates, columns=products).apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(float)
-    values = np.where(valid, np.clip(values, 0.0, None), 0.0)
-    total = values.sum(axis=1)
-    share = np.zeros_like(values)
-    np.divide(values, total[:, None], out=share, where=total[:, None] > 0)
-    return share * (leg_notional / holding)[:, None]
+    return _apply_weight_budget(_weight_values(weight, dates, products), valid, leg_notional, holding)
+
+
+def _aligned_masks(
+    long_mask: pd.DataFrame,
+    short_mask: pd.DataFrame,
+    dates: pd.Index,
+    products: list,
+) -> tuple[np.ndarray, np.ndarray]:
+    def bits(mask: pd.DataFrame) -> np.ndarray:
+        return mask.reindex(index=dates, columns=products).astype("boolean").fillna(False).astype(bool).to_numpy()
+
+    return bits(long_mask), bits(short_mask)
+
+
+def _entry_prices(prices: np.ndarray, lag: int) -> np.ndarray:
+    entry = np.full_like(prices, np.nan)
+    entry[: len(prices) - lag] = prices[lag:]
+    return entry
+
+
+def _lots_on_entry(
+    lm: np.ndarray,
+    sm: np.ndarray,
+    entry: np.ndarray,
+    mult: np.ndarray,
+    leg_notional: np.ndarray,
+    holding: int,
+    *,
+    require_both_legs: bool = True,
+    allocation: str = "leg",
+    long_weight: np.ndarray | None = None,
+    short_weight: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """按已经对齐的入场价定手。入场价是信号日之后第 lag 天的价格，调用方必须用完整序列算好。"""
+    valid_l = lm & np.isfinite(entry)
+    valid_s = sm & np.isfinite(entry)
+    nl = valid_l.sum(axis=1)
+    ns = valid_s.sum(axis=1)
+    if allocation == "equal_active":
+        each = np.where(nl + ns > 0, leg_notional / holding / np.maximum(nl + ns, 1), 0.0)
+        budget_l = np.broadcast_to(each[:, None], valid_l.shape).copy()
+        budget_s = np.broadcast_to(each[:, None], valid_s.shape).copy()
+    elif long_weight is not None or short_weight is not None:
+        if long_weight is None or short_weight is None:
+            raise ValueError("多空权重必须同时给出")
+        budget_l = _apply_weight_budget(long_weight, valid_l, leg_notional, holding)
+        budget_s = _apply_weight_budget(short_weight, valid_s, leg_notional, holding)
+    else:
+        each_l = np.where(nl > 0, leg_notional / holding / np.maximum(nl, 1), 0.0)
+        each_s = np.where(ns > 0, leg_notional / holding / np.maximum(ns, 1), 0.0)
+        budget_l = np.broadcast_to(each_l[:, None], valid_l.shape).copy()
+        budget_s = np.broadcast_to(each_s[:, None], valid_s.shape).copy()
+    unit = np.where(np.isfinite(entry), entry * mult, np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        lots_l = np.where(valid_l, np.floor(budget_l / unit), 0.0)
+        lots_s = np.where(valid_s, np.floor(budget_s / unit), 0.0)
+    lots_l = np.nan_to_num(lots_l)
+    lots_s = np.nan_to_num(lots_s)
+    zero_lot = (valid_l & (lots_l == 0)).sum(axis=1) + (valid_s & (lots_s == 0)).sum(axis=1)
+    lots = lots_l - lots_s
+    long_book = lots_l.sum(axis=1) > 0
+    short_book = lots_s.sum(axis=1) > 0
+    cohort_ok = (long_book & short_book) if require_both_legs else (long_book | short_book)
+    lots = np.where(cohort_ok[:, None], lots, 0.0)
+    return lots, zero_lot
 
 
 def _size_lots(
@@ -196,43 +279,16 @@ def _size_lots(
 ) -> tuple[pd.DataFrame, np.ndarray]:
     products = list(price.columns)
     dates = price.index
-    n = len(dates)
-    lm = long_mask.reindex(index=dates, columns=products).astype("boolean").fillna(False).astype(bool).to_numpy()
-    sm = short_mask.reindex(index=dates, columns=products).astype("boolean").fillna(False).astype(bool).to_numpy()
+    lm, sm = _aligned_masks(long_mask, short_mask, dates, products)
     mult = np.array([specs[p]["multiplier"] for p in products])
-    prices = price.to_numpy(float)
-    entry = np.full_like(prices, np.nan)
-    entry[: n - lag] = prices[lag:]
-    valid_l = lm & np.isfinite(entry)
-    valid_s = sm & np.isfinite(entry)
-    nl = valid_l.sum(axis=1)
-    ns = valid_s.sum(axis=1)
-    if allocation == "equal_active":
-        each = np.where(nl + ns > 0, leg_notional / holding / np.maximum(nl + ns, 1), 0.0)
-        budget_l = np.broadcast_to(each[:, None], valid_l.shape).copy()
-        budget_s = np.broadcast_to(each[:, None], valid_s.shape).copy()
-    elif long_weight is not None or short_weight is not None:
-        if long_weight is None or short_weight is None:
-            raise ValueError("多空权重必须同时给出")
-        budget_l = _weight_budget(long_weight, dates, products, valid_l, leg_notional, holding)
-        budget_s = _weight_budget(short_weight, dates, products, valid_s, leg_notional, holding)
-    else:
-        each_l = np.where(nl > 0, leg_notional / holding / np.maximum(nl, 1), 0.0)
-        each_s = np.where(ns > 0, leg_notional / holding / np.maximum(ns, 1), 0.0)
-        budget_l = np.broadcast_to(each_l[:, None], valid_l.shape).copy()
-        budget_s = np.broadcast_to(each_s[:, None], valid_s.shape).copy()
-    unit = np.where(np.isfinite(entry), entry * mult, np.nan)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        lots_l = np.where(valid_l, np.floor(budget_l / unit), 0.0)
-        lots_s = np.where(valid_s, np.floor(budget_s / unit), 0.0)
-    lots_l = np.nan_to_num(lots_l)
-    lots_s = np.nan_to_num(lots_s)
-    zero_lot = (valid_l & (lots_l == 0)).sum(axis=1) + (valid_s & (lots_s == 0)).sum(axis=1)
-    lots = lots_l - lots_s
-    long_book = lots_l.sum(axis=1) > 0
-    short_book = lots_s.sum(axis=1) > 0
-    cohort_ok = (long_book & short_book) if require_both_legs else (long_book | short_book)
-    lots = np.where(cohort_ok[:, None], lots, 0.0)
+    entry = _entry_prices(price.to_numpy(float), lag)
+    long_values = None if long_weight is None else _weight_values(long_weight, dates, products)
+    short_values = None if short_weight is None else _weight_values(short_weight, dates, products)
+    lots, zero_lot = _lots_on_entry(
+        lm, sm, entry, mult, leg_notional, holding,
+        require_both_legs=require_both_legs, allocation=allocation,
+        long_weight=long_values, short_weight=short_values,
+    )
     frame = pd.DataFrame(lots, index=dates, columns=products)
     frame.attrs["zero_lot_names"] = zero_lot
     return frame, zero_lot
@@ -247,6 +303,18 @@ def _cohort_spans(cohort_holding: np.ndarray | None, n: int) -> np.ndarray | Non
     if np.any(spans < 0):
         raise ValueError("cohort_holding 不能为负")
     return spans
+
+
+def _compound_weight(
+    weight: pd.DataFrame | None,
+    dates: pd.Index,
+    products: list,
+) -> np.ndarray | None:
+    if weight is None:
+        return None
+    frame = weight.copy()
+    frame.columns = products
+    return _weight_values(frame, dates, products)
 
 
 def _compound_lots(
@@ -267,44 +335,52 @@ def _compound_lots(
     long_weight: pd.DataFrame | None = None,
     short_weight: pd.DataFrame | None = None,
 ) -> np.ndarray:
-    """按信号日收盘后的权益逐批定手。当天盈亏只来自更早的批次。"""
+    """按信号日收盘后的权益逐批定手。当天盈亏只来自更早的批次。
+
+    掩码和入场价只对齐一次。每一天只用当天权益计算这一行手数，公式与 ``_size_lots`` 相同。
+    """
     dates_n, n_products = values.shape
-    price = pd.DataFrame(values, index=long_mask.index)
-    specs = {
-        i: {"multiplier": float(mult[i]), "margin_rate": float(margin_rate[i])}
-        for i in range(n_products)
-    }
-    # _size_lots expects column labels. Use integer columns matching the masks.
-    long_mask = long_mask.copy()
-    short_mask = short_mask.copy()
-    long_mask.columns = range(n_products)
-    short_mask.columns = range(n_products)
-    price.columns = range(n_products)
+    dates = long_mask.index
+    products = list(range(n_products))
+    price = pd.DataFrame(values, index=dates, columns=products)
+    long_frame = long_mask.copy()
+    short_frame = short_mask.copy()
+    long_frame.columns = products
+    short_frame.columns = products
+    lm, sm = _aligned_masks(long_frame, short_frame, dates, products)
+    entry = _entry_prices(price.to_numpy(float), lag)
+    multiplier = np.array([float(mult[i]) for i in products])
     if long_weight is not None:
-        long_weight = long_weight.copy()
-        short_weight = short_weight.copy()
-        long_weight.columns = range(n_products)
-        short_weight.columns = range(n_products)
+        long_frame_w = long_weight.copy()
+        short_frame_w = short_weight.copy()
+        long_frame_w.columns = products
+        short_frame_w.columns = products
+        long_values = _weight_values(long_frame_w, dates, products)
+        short_values = _weight_values(short_frame_w, dates, products)
+    else:
+        long_values = None
+        short_values = _compound_weight(short_weight, dates, products)
     lots = np.zeros_like(values)
     equity = float(capital)
     rate = cost_bps / 10_000.0
     change = np.full_like(values, np.nan)
     change[1:] = values[1:] - values[:-1]
+    share = 1.0 if allocation == "equal_active" else 0.5
     for day in range(dates_n):
         day_pnl, day_cost = _day_flow(
             lots, values, change, mult, day, holding, lag, rate, cohort_holding=cohort_holding,
             execution=execution, codes=codes,
         )
         equity = equity + day_pnl - day_cost
-        budget = np.zeros(dates_n)
-        share = 1.0 if allocation == "equal_active" else 0.5
-        budget[day] = max(equity, 0.0) * share
-        sized, _zero = _size_lots(
-            long_mask, short_mask, price, specs, holding, lag=lag, leg_notional=budget,
+        budget = np.zeros(1)
+        budget[0] = max(equity, 0.0) * share
+        row, _zero = _lots_on_entry(
+            lm[day:day + 1], sm[day:day + 1], entry[day:day + 1], multiplier, budget, holding,
             require_both_legs=require_both_legs, allocation=allocation,
-            long_weight=long_weight, short_weight=short_weight,
+            long_weight=None if long_values is None else long_values[day:day + 1],
+            short_weight=None if short_values is None else short_values[day:day + 1],
         )
-        lots[day] = sized.to_numpy(float)[day]
+        lots[day] = row[0]
     return lots
 
 

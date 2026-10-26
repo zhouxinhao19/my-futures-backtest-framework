@@ -1,0 +1,9 @@
+{
+  "source": "af76ae91081f1fd7d715884977ef1a2318850490",
+  "skipped": [
+    {
+      "path": "tests/test_backtest_speed.py",
+      "reason": "测试引用了 profile_backtest_speed"
+    }
+  ]
+}
