@@ -18,10 +18,15 @@ def _frame(days):
     return pd.DataFrame(rows)
 
 
+def _ids(series: pd.Series) -> list:
+    """空主力在不同 pandas 版本里是 None 或 NaN，比较时都当成缺失。"""
+    return [None if pd.isna(value) else value for value in series]
+
+
 def test_main_requires_three_consecutive_leading_days():
     lead_a = {"SR2003": (100, 100), "SR2005": (50, 50)}
     out = select_contracts(_frame([lead_a] * 4))
-    assert out["main_contract_id"].tolist() == [None, None, "SR2003", "SR2003"]
+    assert _ids(out["main_contract_id"]) == [None, None, "SR2003", "SR2003"]
     assert out["main_event"].tolist() == ["none", "none", "confirm", "hold"]
 
 
@@ -29,7 +34,7 @@ def test_main_switches_forward_and_never_rolls_back():
     lead_a = {"SR2003": (100, 100), "SR2005": (50, 50)}
     lead_b = {"SR2003": (50, 50), "SR2005": (100, 100)}
     out = select_contracts(_frame([lead_a] * 3 + [lead_b] * 3 + [lead_a] * 3))
-    assert out["main_contract_id"].tolist() == [
+    assert _ids(out["main_contract_id"]) == [
         None, None, "SR2003", "SR2003", "SR2003", "SR2005", "SR2005", "SR2005", "SR2005"]
     assert out.loc[5, "main_event"] == "switch"
 
@@ -53,7 +58,7 @@ def test_main_is_empty_when_current_contract_has_no_quote():
     lead_a = {"SR2003": (100, 100), "SR2005": (50, 50)}
     only_b = {"SR2005": (50, 50)}
     out = select_contracts(_frame([lead_a] * 3 + [only_b]))
-    assert out.loc[3, "main_contract_id"] is None
+    assert pd.isna(out.loc[3, "main_contract_id"])
     assert out.loc[3, "main_event"] == "missing"
 
 
