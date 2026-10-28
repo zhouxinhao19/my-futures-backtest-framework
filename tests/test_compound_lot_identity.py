@@ -207,3 +207,111 @@ def test_compound_lots_array_matches_legacy_on_every_day():
     )
     assert np.array_equal(current, legacy)
     assert np.any(current != 0)
+
+
+def _legacy_code_changed(previous: np.ndarray, current: np.ndarray) -> np.ndarray:
+    """改前的逐日合约比较：每个交易日单独做 Series.map。"""
+    def text(values: np.ndarray) -> pd.Series:
+        return pd.Series(values, dtype="object").map(
+            lambda value: "" if value is None or (isinstance(value, float) and np.isnan(value)) else str(value).strip()
+        )
+
+    prev = text(previous)
+    cur = text(current)
+    return (
+        prev.ne("") & cur.ne("") & prev.str.lower().ne("nan") & cur.str.lower().ne("nan") & prev.ne(cur)
+    ).to_numpy()
+
+
+def _full_history_flow(
+    lots, values, change, mult, day, holding, lag, rate, *,
+    cohort_holding=None, execution="cohort", codes=None,
+):
+    """改前的复利扫描：每个交易日从第一批信号看到当天。"""
+    pnl = 0.0
+    cost = 0.0
+    symbol_cost = np.zeros(lots.shape[1]) if codes is not None else None
+    n = len(lots)
+    for signal in range(day):
+        span = holding if cohort_holding is None else int(cohort_holding[signal])
+        if span < 1:
+            continue
+        age = day - signal
+        if lag + 1 <= age <= lag + span and np.isfinite(change[day]).any():
+            contrib = lots[signal] * mult * change[day]
+            pnl += float(np.nansum(np.where(np.isfinite(contrib), contrib, 0.0)))
+        if execution == "cohort" and age == lag + 1:
+            entry = values[signal + lag] if signal + lag < n else np.full(values.shape[1], np.nan)
+            opened = np.abs(lots[signal]) * np.nan_to_num(entry) * mult * rate
+            cost += float(np.nansum(opened))
+            if symbol_cost is not None:
+                symbol_cost += opened
+        if execution == "cohort" and age == lag + span + 1:
+            exit_at = signal + lag + span
+            exit_price = values[exit_at] if exit_at < n else np.full(values.shape[1], np.nan)
+            closed = np.abs(lots[signal]) * np.nan_to_num(exit_price) * mult * rate
+            cost += float(np.nansum(closed))
+            if symbol_cost is not None:
+                symbol_cost += closed
+    if execution == "adjust" and day > 0:
+        current = ledger._position_on_day(lots, day, holding, lag, cohort_holding)
+        previous = ledger._position_on_day(lots, day - 1, holding, lag, cohort_holding)
+        price = values[day - 1]
+        traded = np.abs(current - previous) * np.nan_to_num(price) * mult * rate
+        if codes is None:
+            return pnl, float(np.nansum(traded))
+        adjusted = ledger._roll_symbol_cost(
+            traded, previous, current, price, mult, rate,
+            previous_code=codes[day - 1], current_code=codes[day],
+        )
+        return pnl, float(np.nansum(adjusted))
+    if symbol_cost is not None and day > 0:
+        current = ledger._position_on_day(lots, day, holding, lag, cohort_holding)
+        previous = ledger._position_on_day(lots, day - 1, holding, lag, cohort_holding)
+        price = values[day - 1]
+        symbol_cost = ledger._roll_symbol_cost(
+            symbol_cost, previous, current, price, mult, rate,
+            previous_code=codes[day - 1], current_code=codes[day],
+        )
+        cost = float(np.nansum(symbol_cost))
+    return pnl, cost
+
+
+def test_roll_mask_matches_daily_code_compare():
+    codes = np.array([
+        [None, "au01", " nan ", "AU", "rb", ""],
+        ["", "au01", "AU", "au", float("nan"), "nan"],
+        ["au02", "AU01", "nan", "au", "rb", " RB "],
+    ], dtype=object)
+    mask = ledger._roll_mask(codes)
+    assert not mask[0].any()
+    for day in range(1, len(codes)):
+        np.testing.assert_array_equal(mask[day], _legacy_code_changed(codes[day - 1], codes[day]))
+
+
+def test_windowed_day_flow_matches_full_history_scan():
+    long, short, price, specs, contracts, _weights = _market(11)
+    spans = np.zeros(len(price), dtype=int)
+    spans[::3] = 4
+    spans[2] = 0
+    values = price.to_numpy(float)
+    change = np.full_like(values, np.nan)
+    change[1:] = values[1:] - values[:-1]
+    products = list(price.columns)
+    mult = np.array([float(specs[name]["multiplier"]) for name in products])
+    codes = contracts.to_numpy(dtype=object)
+    lots = ledger._compound_lots(
+        long, short, values, mult, np.zeros(len(products)), 5, 1, 5.0, 10_000_000,
+        cohort_holding=spans, execution="adjust", codes=codes,
+    )
+    roll = ledger._roll_mask(codes)
+    for day in range(len(price)):
+        current = ledger._day_flow(
+            lots, values, change, mult, day, 5, 1, 0.0005,
+            cohort_holding=spans, execution="adjust", codes=codes, rolled=roll[day],
+        )
+        legacy = _full_history_flow(
+            lots, values, change, mult, day, 5, 1, 0.0005,
+            cohort_holding=spans, execution="adjust", codes=codes,
+        )
+        assert current == legacy

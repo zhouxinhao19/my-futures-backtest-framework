@@ -366,10 +366,11 @@ def _compound_lots(
     change = np.full_like(values, np.nan)
     change[1:] = values[1:] - values[:-1]
     share = 1.0 if allocation == "equal_active" else 0.5
+    roll = None if codes is None else _roll_mask(codes)
     for day in range(dates_n):
         day_pnl, day_cost = _day_flow(
             lots, values, change, mult, day, holding, lag, rate, cohort_holding=cohort_holding,
-            execution=execution, codes=codes,
+            execution=execution, codes=codes, rolled=None if roll is None else roll[day],
         )
         equity = equity + day_pnl - day_cost
         budget = np.zeros(1)
@@ -384,6 +385,14 @@ def _compound_lots(
     return lots
 
 
+def _signal_start(day: int, holding: int, lag: int, cohort_holding: np.ndarray | None) -> int:
+    """当天盈亏和平仓成本只会用到这个信号日及之后的批次。"""
+    if day <= 0:
+        return 0
+    span_cap = holding if cohort_holding is None else int(np.max(cohort_holding))
+    return max(0, day - (lag + span_cap + 1))
+
+
 def _day_flow(
     lots: np.ndarray,
     values: np.ndarray,
@@ -396,12 +405,15 @@ def _day_flow(
     cohort_holding: np.ndarray | None = None,
     execution: str = "cohort",
     codes: np.ndarray | None = None,
+    rolled: np.ndarray | None = None,
 ) -> tuple[float, float]:
     pnl = 0.0
     cost = 0.0
     symbol_cost = np.zeros(lots.shape[1]) if codes is not None else None
+    if codes is not None and rolled is None and day > 0:
+        rolled = _code_changed(codes[day - 1], codes[day])
     n = len(lots)
-    for signal in range(day):
+    for signal in range(_signal_start(day, holding, lag, cohort_holding), day):
         span = holding if cohort_holding is None else int(cohort_holding[signal])
         if span < 1:
             continue
@@ -431,13 +443,17 @@ def _day_flow(
         traded = np.abs(current - previous) * np.nan_to_num(price) * mult * rate
         if codes is None:
             return pnl, float(np.nansum(traded))
-        symbol_cost = _roll_symbol_cost(traded, previous, current, codes[day - 1], codes[day], price, mult, rate)
+        symbol_cost = _roll_symbol_cost(
+            traded, previous, current, price, mult, rate, rolled=rolled,
+        )
         return pnl, float(np.nansum(symbol_cost))
     if symbol_cost is not None and day > 0:
         current = _position_on_day(lots, day, holding, lag, cohort_holding)
         previous = _position_on_day(lots, day - 1, holding, lag, cohort_holding)
         price = values[day - 1]
-        symbol_cost = _roll_symbol_cost(symbol_cost, previous, current, codes[day - 1], codes[day], price, mult, rate)
+        symbol_cost = _roll_symbol_cost(
+            symbol_cost, previous, current, price, mult, rate, rolled=rolled,
+        )
         cost = float(np.nansum(symbol_cost))
     return pnl, cost
 
@@ -570,8 +586,9 @@ def _account(
                     cost[exit_day] += float(closed.sum())
     if execution == "adjust":
         cost, symbol_cost = _adjust_cost(held, values, mult, rate)
-    if codes is not None:
-        symbol_cost = _roll_book_cost(held, codes, values, mult, rate, symbol_cost)
+    roll = None if codes is None else _roll_mask(codes)
+    if roll is not None:
+        symbol_cost = _roll_book_cost(held, values, mult, rate, symbol_cost, roll)
         cost = symbol_cost.sum(axis=1)
     net = pnl - cost
     equity_before = np.full(n, float(capital))
@@ -609,35 +626,61 @@ def _account(
         trades = _trades(
             lots, values, mult, dates, products, holding, lag, rate, cohort_ok, cohort_holding=cohort_holding,
         )
-    if codes is not None:
-        trades = _rewrite_roll_trades(trades, held, codes, values, mult, dates, products, rate)
+    if roll is not None:
+        trades = _rewrite_roll_trades(trades, held, codes, values, mult, dates, products, rate, roll)
     positions = _positions(held, symbol_pnl, symbol_cost, values, mult, dates, products)
     return daily, trades, positions
 
 
+def _blank_code(value: object) -> str:
+    """空值、浮点 NaN 和大小写 nan 都视为没有合约代码。其余保留原样，只去掉两端空白。"""
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() == "nan" else text
+
+
+def _normalize_codes(codes: np.ndarray) -> np.ndarray:
+    flat = np.asarray(codes, dtype=object).ravel()
+    return np.array([_blank_code(value) for value in flat], dtype=object).reshape(np.shape(codes))
+
+
+def _roll_mask(codes: np.ndarray) -> np.ndarray:
+    """每个交易日、每个品种是否换月。第 0 行没有上一交易日，全部为假。"""
+    out = np.zeros(np.shape(codes), dtype=bool)
+    if len(codes) < 2:
+        return out
+    prev = _normalize_codes(codes[:-1])
+    cur = _normalize_codes(codes[1:])
+    out[1:] = (prev != "") & (cur != "") & (prev != cur)
+    return out
+
+
 def _code_changed(previous: np.ndarray, current: np.ndarray) -> np.ndarray:
     """相邻两日都有合约代码且代码不同。"""
-    def text(values: np.ndarray) -> pd.Series:
-        return pd.Series(values, dtype="object").map(
-            lambda value: "" if value is None or (isinstance(value, float) and np.isnan(value)) else str(value).strip()
-        )
-    prev = text(previous)
-    cur = text(current)
-    return (prev.ne("") & cur.ne("") & prev.str.lower().ne("nan") & cur.str.lower().ne("nan") & prev.ne(cur)).to_numpy()
+    stacked = np.vstack([
+        np.asarray(previous, dtype=object).reshape(1, -1),
+        np.asarray(current, dtype=object).reshape(1, -1),
+    ])
+    return _roll_mask(stacked)[1]
 
 
 def _roll_symbol_cost(
     base: np.ndarray,
     previous_pos: np.ndarray,
     current_pos: np.ndarray,
-    previous_code: np.ndarray,
-    current_code: np.ndarray,
     price: np.ndarray,
     mult: np.ndarray,
     rate: float,
+    rolled: np.ndarray | None = None,
+    previous_code: np.ndarray | None = None,
+    current_code: np.ndarray | None = None,
 ) -> np.ndarray:
     """换月日用平旧开新替换该品种当天的原交易成本。"""
-    rolled = _code_changed(previous_code, current_code)
+    if rolled is None:
+        if previous_code is None or current_code is None:
+            raise ValueError("换月成本需要换月掩码或相邻两日的合约代码")
+        rolled = _code_changed(previous_code, current_code)
     if not np.any(rolled):
         return base
     amount = (np.abs(previous_pos) + np.abs(current_pos)) * np.nan_to_num(price) * mult * rate
@@ -648,16 +691,16 @@ def _roll_symbol_cost(
 
 def _roll_book_cost(
     held: np.ndarray,
-    codes: np.ndarray,
     values: np.ndarray,
     mult: np.ndarray,
     rate: float,
     symbol_cost: np.ndarray,
+    roll: np.ndarray,
 ) -> np.ndarray:
     out = np.array(symbol_cost, dtype=float, copy=True)
     for day in range(1, len(held)):
         out[day] = _roll_symbol_cost(
-            out[day], held[day - 1], held[day], codes[day - 1], codes[day], values[day - 1], mult, rate,
+            out[day], held[day - 1], held[day], values[day - 1], mult, rate, rolled=roll[day],
         )
     return out
 
@@ -671,7 +714,10 @@ def _rewrite_roll_trades(
     dates: pd.Index,
     products: list[str],
     rate: float,
+    roll: np.ndarray | None = None,
 ) -> pd.DataFrame:
+    if roll is None:
+        roll = _roll_mask(codes)
     kept = trades.copy() if trades is not None and not trades.empty else pd.DataFrame(columns=[
         "cohort_date", "symbol", "side", "action", "trade_date", "lots", "price", "multiplier", "notional", "cost",
     ])
@@ -679,7 +725,7 @@ def _rewrite_roll_trades(
         kept["trade_date"] = pd.to_datetime(kept["trade_date"])
     rows: list[dict[str, object]] = []
     for day in range(1, len(dates)):
-        rolled = _code_changed(codes[day - 1], codes[day])
+        rolled = roll[day]
         if not np.any(rolled):
             continue
         names = [products[col] for col in np.flatnonzero(rolled)]
@@ -872,6 +918,7 @@ def delta_rebalance_backtest(
     capital: float = CAPITAL,
     compound: bool = True,
     contracts: pd.DataFrame | None = None,
+    weights: pd.DataFrame | None = None,
 ) -> ResearchResult:
     """周频调仓只交易目标手数和现有手数的差额。
 
@@ -879,6 +926,7 @@ def delta_rebalance_backtest(
     成交日当天的涨跌仍算在旧仓上，新仓从再下一个交易日开始计盈亏。
     样本最后一批仓位在计划退出日平掉。
     ``contracts`` 给出每天的主力合约代码。代码变化且仍有持仓时，按平掉旧合约、开回新合约计成本，换月价差不进盈亏。
+    ``weights`` 给出信号日的目标名义占权益比例，含正负号。给出后不再把权益等分给有信号的品种。
     """
     if lag < 1:
         raise ValueError("lag 必须为正整数")
@@ -896,6 +944,14 @@ def delta_rebalance_backtest(
     codes = None if contracts is None else contracts.reindex(index=dates, columns=products).to_numpy(dtype=object)
     long_on = long_mask.reindex(index=dates, columns=products).astype("boolean").fillna(False).astype(bool).to_numpy()
     short_on = short_mask.reindex(index=dates, columns=products).astype("boolean").fillna(False).astype(bool).to_numpy()
+    weight_on = None
+    if weights is not None:
+        weight_on = (
+            weights.reindex(index=dates, columns=products)
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+            .to_numpy(float)
+        )
     mult = np.array([float(specs[p]["multiplier"]) for p in products])
     margin_rate = np.array([float(specs[p]["margin_rate"]) for p in products])
     change = np.full_like(values, np.nan)
@@ -928,6 +984,7 @@ def delta_rebalance_backtest(
     equity_before = np.full(n, equity)
     equity_after = np.full(n, equity)
     trades: list[dict[str, object]] = []
+    roll = None if codes is None else _roll_mask(codes)
     for day in range(n):
         equity_before[day] = equity
         moved = change[day]
@@ -937,10 +994,10 @@ def delta_rebalance_backtest(
         symbol_pnl[day] = np.where(finite, raw, 0.0)
         missing[day] = int(((position != 0) & ~np.isfinite(moved)).sum())
         held[day] = position
-        if codes is not None and day > 0:
+        if roll is not None and day > 0:
             scheduled_cost[day] = _roll_symbol_cost(
                 scheduled_cost[day], held[day - 1], held[day],
-                codes[day - 1], codes[day], values[day - 1], mult, rate,
+                values[day - 1], mult, rate, rolled=roll[day],
             )
         day_cost_vec = scheduled_cost[day]
         day_cost = float(day_cost_vec.sum())
@@ -955,14 +1012,20 @@ def delta_rebalance_backtest(
         equity_after[day] = equity
         if int(spans[day]) > 0 and day + lag < n:
             budget = equity if compound else float(capital)
-            targets[day + lag] = _equal_active_lots(
-                budget, values[day + lag], long_on[day], short_on[day], mult,
-            )
             unit = values[day + lag] * mult
-            active = (long_on[day] | short_on[day]) & np.isfinite(unit) & (unit != 0)
-            if active.any():
-                each = budget / int(active.sum())
-                raw_lots = np.floor(each / unit)
+            if weight_on is None:
+                targets[day + lag] = _equal_active_lots(
+                    budget, values[day + lag], long_on[day], short_on[day], mult,
+                )
+                active = (long_on[day] | short_on[day]) & np.isfinite(unit) & (unit != 0)
+                if active.any():
+                    each = budget / int(active.sum())
+                    raw_lots = np.floor(each / unit)
+                    zero_lot[day] = int((active & (np.nan_to_num(raw_lots) == 0)).sum())
+            else:
+                targets[day + lag] = _weighted_lots(budget, values[day + lag], weight_on[day], mult)
+                active = (weight_on[day] != 0) & np.isfinite(unit) & (unit != 0)
+                raw_lots = np.floor(np.abs(weight_on[day]) * budget / unit)
                 zero_lot[day] = int((active & (np.nan_to_num(raw_lots) == 0)).sum())
         if day not in executions:
             continue
@@ -1020,10 +1083,29 @@ def delta_rebalance_backtest(
     inactive = daily["cohorts"].eq(0) & daily["cost"].eq(0) & daily["pnl"].eq(0)
     daily.loc[inactive, ["ret", "gross_ret"]] = np.nan
     trade_frame = pd.DataFrame(trades)
-    if codes is not None:
-        trade_frame = _rewrite_roll_trades(trade_frame, held, codes, values, mult, dates, products, rate)
+    if roll is not None:
+        trade_frame = _rewrite_roll_trades(
+            trade_frame, held, codes, values, mult, dates, products, rate, roll,
+        )
     positions = _positions(held, symbol_pnl, scheduled_cost, values, mult, dates, products)
     return ResearchResult(daily=daily, trades=trade_frame, positions=positions)
+
+
+def _weighted_lots(
+    equity: float,
+    exec_price: np.ndarray,
+    weight_row: np.ndarray,
+    mult: np.ndarray,
+) -> np.ndarray:
+    """按权益权重定手。权重是目标名义占权益的比例，含正负号，不再归一。"""
+    unit = exec_price * mult
+    lots = np.zeros(len(exec_price))
+    active = np.isfinite(weight_row) & (weight_row != 0) & np.isfinite(unit) & (unit != 0)
+    if equity <= 0 or not active.any():
+        return lots
+    sized = np.floor(np.abs(weight_row) * float(equity) / unit) * np.sign(weight_row)
+    lots[active] = np.nan_to_num(sized[active])
+    return lots
 
 
 def _equal_active_lots(

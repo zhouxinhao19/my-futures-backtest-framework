@@ -14,9 +14,17 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+_DATA_CONFIG_CACHE: dict[str, Any] | None = None
+_UNIVERSE_CACHE: dict[str, Any] | None = None
+
+
 def data_config() -> dict[str, Any]:
-    with (ROOT / "configs" / "data.yaml").open(encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    """读取数据配置。同一次进程里只解析一次 ``configs/data.yaml``。"""
+    global _DATA_CONFIG_CACHE
+    if _DATA_CONFIG_CACHE is None:
+        with (ROOT / "configs" / "data.yaml").open(encoding="utf-8") as f:
+            _DATA_CONFIG_CACHE = yaml.safe_load(f) or {}
+    return _DATA_CONFIG_CACHE
 
 
 _DATA_CONFIG = data_config()
@@ -29,8 +37,12 @@ MONGO_DB = os.getenv("QA_MONGO_DB", _DATA_CONFIG.get(
 
 
 def config() -> dict[str, Any]:
-    with (ROOT / "configs" / "universe.yaml").open(encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    """读取品种池和交易规格。同一次进程里只解析一次 ``configs/universe.yaml``。"""
+    global _UNIVERSE_CACHE
+    if _UNIVERSE_CACHE is None:
+        with (ROOT / "configs" / "universe.yaml").open(encoding="utf-8") as f:
+            _UNIVERSE_CACHE = yaml.safe_load(f)
+    return _UNIVERSE_CACHE
 
 
 def symbols() -> list[str]:
@@ -66,7 +78,7 @@ def symbol_spec(symbol: str) -> dict[str, Any]:
         return specs[key]
     alias = key if key.endswith("_MAIN") else f"{key}_MAIN"
     if alias in specs:
-        if key.endswith("_MAIN") and product_key not in products:
+        if product_key not in products:
             warnings.warn(
                 f"{alias} 是过渡别名，新代码请使用 products.{product_key}",
                 DeprecationWarning,
@@ -319,6 +331,70 @@ def load_volume_oi_panel(
     return load_commodity_volume_oi_panel(symbol, start, end, roll_window)
 
 
+def _product_code(symbol: str) -> str:
+    product = str(symbol).upper()
+    for suffix in ("_TS_MAIN", "_MAIN"):
+        if product.endswith(suffix):
+            product = product[: -len(suffix)]
+            break
+    return product
+
+
+_RESEARCH_PROJECTION = {
+    "_id": 0, "date": 1, "code": 1, "contract_object": 1,
+    "expiry": 1, "open": 1, "high": 1, "low": 1, "close": 1,
+    "settle": 1, "adj_open": 1, "adj_high": 1, "adj_low": 1,
+    "adj_close": 1, "adj_settle": 1, "basis_rate": 1, "spot_price": 1,
+    "trade_turnover_vol": 1,
+    "trade_turnover_value": 1, "trade_open_int": 1,
+}
+
+
+def _fetch_research_rows(products: list[str], start: str, end: str | None) -> pd.DataFrame:
+    """一次查出这些品种在 ``price_data_research`` 里的选定主力。"""
+    wanted = sorted({_product_code(symbol) for symbol in products})
+    label = ",".join(wanted)
+    try:
+        from pymongo import MongoClient
+
+        with MongoClient(MONGO_URI) as client:
+            rows = list(client[MONGO_DB].price_data_research.find(
+                {"contract_object": {"$in": wanted}, "date": _date_query(start, end)},
+                _RESEARCH_PROJECTION,
+            ).sort("date", 1))
+    except Exception as exc:
+        raise RuntimeError(
+            f"{label} 查询 {MONGO_DB}.price_data_research 失败；"
+            "禁止自动回退到其它集合或本地文件"
+        ) from exc
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).rename(columns={
+        "trade_turnover_vol": "volume",
+        "trade_turnover_value": "turnover_value",
+        "trade_open_int": "position",
+    })
+
+
+def _rows_for_product(raw: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    product = _product_code(symbol)
+    if raw.empty or "contract_object" not in raw.columns:
+        return raw.iloc[0:0].copy()
+    return raw.loc[raw["contract_object"].astype(str).str.upper() == product].copy()
+
+
+def load_main_panels(products: list[str], start: str, end: str) -> pd.DataFrame:
+    """一次查询多个品种的选定主力，再按请求顺序做与单品种入口相同的清洗。"""
+    if not products:
+        raise ValueError("品种列表为空")
+    raw = _fetch_research_rows(products, start, end)
+    frames = [
+        _research_panel_from_rows(_rows_for_product(raw, symbol), symbol)
+        for symbol in products
+    ]
+    return pd.concat(frames, ignore_index=True)
+
+
 def load_commodity_volume_oi_panel(
     symbol: str,
     start: str,
@@ -332,48 +408,17 @@ def load_commodity_volume_oi_panel(
     该入口不允许回退到其它集合或本地 CSV。``adj_close`` 只用于收益；
     ``volume`` 和 ``position`` 保持交易所手数口径。
     """
-    product = str(symbol).upper()
-    for suffix in ("_TS_MAIN", "_MAIN"):
-        if product.endswith(suffix):
-            product = product[: -len(suffix)]
-            break
-
     # price_data_research 已经是一条/品种/日期的连续序列，不能再按
     # OI 选择合约。该集合同时保存复权价格、成交量和持仓量。
-    raw = pd.DataFrame()
-    try:
-        from pymongo import MongoClient
+    raw = _rows_for_product(_fetch_research_rows([symbol], start, end), symbol)
+    return _research_panel_from_rows(raw, symbol, roll_window)
 
-        projection = {
-            "_id": 0, "date": 1, "code": 1, "contract_object": 1,
-            "expiry": 1, "open": 1, "high": 1, "low": 1, "close": 1,
-            "settle": 1, "adj_open": 1, "adj_high": 1, "adj_low": 1,
-            "adj_close": 1, "adj_settle": 1, "basis_rate": 1, "spot_price": 1,
-            "trade_turnover_vol": 1,
-            "trade_turnover_value": 1, "trade_open_int": 1,
-        }
-        date_filter: dict[str, str] = {"$gte": start}
-        if end is not None:
-            date_filter["$lte"] = end
-        rows = list(MongoClient(MONGO_URI)[MONGO_DB].price_data_research.find(
-            {
-                "contract_object": product,
-                "date": date_filter,
-            },
-            projection,
-        ).sort("date", 1))
-        if rows:
-            raw = pd.DataFrame(rows).rename(columns={
-                "trade_turnover_vol": "volume",
-                "trade_turnover_value": "turnover_value",
-                "trade_open_int": "position",
-            })
-    except Exception as exc:
-        raise RuntimeError(
-            f"{symbol} 查询 {MONGO_DB}.price_data_research 失败；"
-            "禁止自动回退到其它集合或本地文件"
-        ) from exc
 
+def _research_panel_from_rows(
+    raw: pd.DataFrame,
+    symbol: str,
+    roll_window: int = 1,
+) -> pd.DataFrame:
     if raw.empty:
         raise RuntimeError(
             f"{symbol} 在 {MONGO_DB}.price_data_research 中没有价量仓数据；"
