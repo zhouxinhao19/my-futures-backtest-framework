@@ -8,28 +8,19 @@
 from __future__ import annotations
 
 import pandas as pd
-from pymongo import MongoClient
 
-from data import MONGO_DB, MONGO_URI, data_config
+from data import read_market_parquet
 
 
 def load_research_main(products: list[str]) -> pd.DataFrame:
-    """读取 price_data_research 的每日主力：contract_object、date、code、expiry。"""
-    coll = data_config()["collections"]["price_panel"]
-    docs = list(MongoClient(MONGO_URI)[MONGO_DB][coll].find(
-        {"contract_object": {"$in": products}},
-        {
-            "_id": 0, "contract_object": 1, "date": 1, "code": 1, "expiry": 1,
-            "adj_settle": 1, "trade_turnover_value": 1,
-        },
-    ))
-    if not docs:
-        raise SystemExit(f"{MONGO_DB}.{coll} 中没有主力数据，停止")
-    out = pd.DataFrame(docs)
+    """读取研究主力 Parquet 的每日主力：contract_object、date、code、expiry。"""
+    coll = "research_panel.parquet"
+    out = read_market_parquet(coll)
+    out = out.loc[out["contract_object"].astype(str).str.upper().isin({item.upper() for item in products})]
+    if out.empty:
+        raise SystemExit(f"{coll} 中没有主力数据，停止")
     if "trade_turnover_value" not in out.columns or out["trade_turnover_value"].isna().all():
-        raise ValueError(
-            f"{MONGO_DB}.{coll} 缺少主力成交额 trade_turnover_value，停止"
-        )
+        raise ValueError(f"{coll} 缺少主力成交额 trade_turnover_value，停止")
     out["turnover_value"] = pd.to_numeric(out["trade_turnover_value"], errors="coerce")
     out["contract_object"] = out["contract_object"].astype(str).str.upper()
     out["date"] = pd.to_datetime(out["date"])

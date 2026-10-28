@@ -1,5 +1,6 @@
 mongo_uri: "mongodb://127.0.0.1:27017"
 mongo_db: "quantaxis_price_data"
+parquet_root: "local_data/market"
 
 collections:
   price_panel: "price_data_research"

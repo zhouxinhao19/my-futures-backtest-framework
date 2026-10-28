@@ -223,45 +223,17 @@ def test_vendor_main_frame_agreement_and_documents():
     assert first["date_stamp"] == _stamp(first["date"])
 
 
-def test_loader_raises_on_empty_collection(monkeypatch):
-    class FakeCursor:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def sort(self, *_args):
-            return self
-
-        def __iter__(self):
-            return iter(self.rows)
-
-    class FakeCollection:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def find(self, *_args):
-            return FakeCursor(self.rows)
-
-    class FakeDB:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def __getitem__(self, _name):
-            return FakeCollection(self.rows)
-
-    class FakeClient:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def __getitem__(self, _name):
-            return FakeDB(self.rows)
-
-    monkeypatch.setattr("pymongo.MongoClient", lambda *_a, **_k: FakeClient([]))
+def test_loader_raises_on_empty_collection(monkeypatch, tmp_path):
+    empty = pd.DataFrame(columns=["contract_object", "date", "date_stamp"])
+    empty.to_parquet(tmp_path / "contract_day_full.parquet", index=False)
+    empty.to_parquet(tmp_path / "vendor_main_map.parquet", index=False)
+    monkeypatch.setattr(data_mod, "parquet_root", lambda: tmp_path)
     with pytest.raises(RuntimeError, match="禁止自动回退"):
         data_mod.load_contract_full_panel(["SR"], "2014-01-01", "2014-12-31")
     with pytest.raises(RuntimeError, match="禁止自动回退"):
         data_mod.load_vendor_main_map("SR", "2014-01-01")
 
-    partial = [{"contract_object": "SR", "date": "2014-01-02", "date_stamp": 1}]
-    monkeypatch.setattr("pymongo.MongoClient", lambda *_a, **_k: FakeClient(partial))
+    partial = pd.DataFrame([{"contract_object": "SR", "date": "2014-01-02", "date_stamp": 1}])
+    partial.to_parquet(tmp_path / "contract_day_full.parquet", index=False)
     with pytest.raises(ValueError, match="缺少字段"):
         data_mod.load_contract_full_panel(["SR"], "2014-01-01", "2014-12-31")

@@ -18,6 +18,23 @@ _DATA_CONFIG_CACHE: dict[str, Any] | None = None
 _UNIVERSE_CACHE: dict[str, Any] | None = None
 
 
+def parquet_root() -> Path:
+    """本地行情 Parquet 目录。相对路径相对仓库根目录。"""
+    configured = data_config().get("parquet_root") or "local_data/market"
+    path = Path(str(configured))
+    if not path.is_absolute():
+        path = ROOT / path
+    return path
+
+
+def read_market_parquet(name: str) -> pd.DataFrame:
+    """读取 ``local_data/market`` 下的一张行情表。文件不存在时停止，不回退。"""
+    path = parquet_root() / name
+    if not path.exists():
+        raise RuntimeError(f"缺少行情文件 {path}；禁止回退到 MongoDB")
+    return pd.read_parquet(path)
+
+
 def data_config() -> dict[str, Any]:
     """读取数据配置。同一次进程里只解析一次 ``configs/data.yaml``。"""
     global _DATA_CONFIG_CACHE
@@ -308,7 +325,7 @@ def load_contract_dataset(
         raise ValueError(f"{symbol} 的选定主力序列存在重复日期")
     if frame.empty:
         raise RuntimeError(
-            f"{symbol} 在 {MONGO_DB}.price_data_research 中没有选定主力序列"
+            f"{symbol} 在研究主力 Parquet 中没有选定主力序列"
         )
     if frame["settle"].isna().any() or frame["adj_settle"].isna().any():
         raise ValueError(f"{symbol} 的 settle/adj_settle 存在缺失")
@@ -351,25 +368,29 @@ _RESEARCH_PROJECTION = {
 
 
 def _fetch_research_rows(products: list[str], start: str, end: str | None) -> pd.DataFrame:
-    """一次查出这些品种在 ``price_data_research`` 里的选定主力。"""
+    """一次查出这些品种在研究主力 Parquet 里的选定主力。"""
     wanted = sorted({_product_code(symbol) for symbol in products})
     label = ",".join(wanted)
     try:
-        from pymongo import MongoClient
-
-        with MongoClient(MONGO_URI) as client:
-            rows = list(client[MONGO_DB].price_data_research.find(
-                {"contract_object": {"$in": wanted}, "date": _date_query(start, end)},
-                _RESEARCH_PROJECTION,
-            ).sort("date", 1))
+        raw = read_market_parquet("research_panel.parquet")
+    except RuntimeError:
+        raise
     except Exception as exc:
         raise RuntimeError(
-            f"{label} 查询 {MONGO_DB}.price_data_research 失败；"
-            "禁止自动回退到其它集合或本地文件"
+            f"{label} 读取研究主力 Parquet 失败；禁止自动回退到其它数据源"
         ) from exc
-    if not rows:
+    raw = raw[raw["contract_object"].astype(str).str.upper().isin(wanted)]
+    if start is not None or end is not None:
+        dates = raw["date"].astype(str).str.slice(0, 10)
+        if start is not None:
+            raw = raw.loc[dates >= start]
+            dates = raw["date"].astype(str).str.slice(0, 10)
+        if end is not None:
+            raw = raw.loc[dates <= end]
+    if raw.empty:
         return pd.DataFrame()
-    return pd.DataFrame(rows).rename(columns={
+    columns = [column for column in _RESEARCH_PROJECTION if column != "_id" and column in raw.columns]
+    return raw.loc[:, columns].rename(columns={
         "trade_turnover_vol": "volume",
         "trade_turnover_value": "turnover_value",
         "trade_open_int": "position",
@@ -421,7 +442,7 @@ def _research_panel_from_rows(
 ) -> pd.DataFrame:
     if raw.empty:
         raise RuntimeError(
-            f"{symbol} 在 {MONGO_DB}.price_data_research 中没有价量仓数据；"
+            f"{symbol} 在研究主力 Parquet 中没有价量仓数据；"
             "禁止自动回退到 future_day 或主力 CSV"
         )
 
@@ -480,60 +501,25 @@ def load_mongo_commodity_panel(
 ) -> pd.DataFrame:
     """内部价格面板实现；统一研究入口请使用 ``load_research_price_panel``。
 
-    ``price_data_research`` 每个品种每天只有一条合约，该合约就是主力。
+    研究主力 Parquet 每个品种每天只有一条合约，该合约就是主力。
     ``adj_close`` 和 ``adj_settle`` 是后复权价格。同一天出现多条合约时直接报错。
     """
-    from pymongo import MongoClient
-
-    collection_name = data_config().get("collections", {}).get(
-        "price_panel", "price_data_research"
-    )
-    query: dict[str, Any] = {
-        "contract_object": {"$nin": sorted(FINANCIAL_FUTURES)},
-    }
-    if start is not None or end is not None:
-        query["date"] = {}
-        if start is not None:
-            query["date"]["$gte"] = start
-        if end is not None:
-            query["date"]["$lte"] = end
+    collection_name = "research_panel.parquet"
+    raw = read_market_parquet(collection_name)
+    raw["date"] = raw["date"].astype(str).str.slice(0, 10)
+    if start is not None:
+        raw = raw.loc[raw["date"] >= start]
+    if end is not None:
+        raw = raw.loc[raw["date"] <= end]
     if products:
-        query["contract_object"] = {
-            "$in": sorted({str(product).upper() for product in products}),
-            "$nin": sorted(FINANCIAL_FUTURES),
-        }
-
-    projection = {
-        "_id": 0,
-        "contract_object": 1,
-        "code": 1,
-        "date": 1,
-        "expiry": 1,
-        "open": 1,
-        "high": 1,
-        "low": 1,
-        "close": 1,
-        "settle": 1,
-        "adj_open": 1,
-        "adj_high": 1,
-        "adj_low": 1,
-        "adj_close": 1,
-        "adj_settle": 1,
-        "basis_rate": 1,
-        "spot_price": 1,
-        "trade_turnover_vol": 1,
-        "trade_turnover_value": 1,
-        "trade_open_int": 1,
-    }
-    with MongoClient(MONGO_URI) as client:
-        rows = list(client[MONGO_DB][collection_name].find(query, projection))
-    if not rows:
+        wanted = {str(product).upper() for product in products}
+        raw = raw.loc[raw["contract_object"].astype(str).str.upper().isin(wanted)]
+    raw = raw.loc[~raw["contract_object"].astype(str).str.upper().isin(FINANCIAL_FUTURES)]
+    if raw.empty:
         raise RuntimeError(
-            f"{MONGO_DB}.{collection_name} 没有符合条件的商品研究行情；"
+            f"{parquet_root() / collection_name} 没有符合条件的商品研究行情；"
             "禁止自动回退到其它数据源"
         )
-
-    raw = pd.DataFrame(rows)
     raw["date"] = pd.to_datetime(raw["date"], errors="coerce")
     if "expiry" in raw.columns:
         raw["expiry"] = pd.to_datetime(raw["expiry"], errors="coerce")
@@ -548,7 +534,7 @@ def load_mongo_commodity_panel(
             raw[column] = pd.to_numeric(raw[column], errors="coerce")
     raw = raw.dropna(subset=["date", "adj_close", "adj_settle"])
     if raw.empty:
-        raise RuntimeError(f"{MONGO_DB}.{collection_name} 清洗后没有可用行情")
+        raise RuntimeError(f"{parquet_root() / collection_name} 清洗后没有可用行情")
     duplicated = raw.duplicated(["contract_object", "date"])
     if duplicated.any():
         sample = raw.loc[duplicated, ["contract_object", "date"]].head(5)
@@ -763,35 +749,23 @@ def load_member_position(
 ) -> pd.DataFrame:
     """读取会员持仓与注册仓单日频表，键为 date + symbol。
 
-    查询方式与 ``load_mongo_basis_rates`` 相同。集合为空时直接报错。
+    集合为空时直接报错。
     """
-    from pymongo import MongoClient
-
-    collection_name = data_config().get("collections", {}).get(
-        "member_position", "member_position_daily"
-    )
-    query: dict[str, Any] = {}
-    if products:
-        query["contract_object"] = {
-            "$in": sorted({str(item).upper() for item in products})
-        }
-    if start is not None or end is not None:
-        query["date"] = {}
-        if start is not None:
-            query["date"]["$gte"] = start
-        if end is not None:
-            query["date"]["$lte"] = end
-    projection = {"_id": 0, "symbol": 1, "date": 1, "receipt_unit": 1}
-    projection.update({field: 1 for field in MEMBER_POSITION_FIELDS})
-    with MongoClient(MONGO_URI) as client:
-        rows = list(client[MONGO_DB][collection_name].find(query, projection))
-    if not rows:
-        raise RuntimeError(
-            f"{MONGO_DB}.{collection_name} 没有符合条件的会员持仓；禁止静默回退"
-        )
-    frame = pd.DataFrame(rows)
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = read_market_parquet("member_position.parquet")
+    frame["date"] = frame["date"].astype(str).str.slice(0, 10)
     frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    if products:
+        wanted = {str(item).upper() for item in products}
+        frame = frame.loc[frame["symbol"].isin(wanted)]
+    if start is not None:
+        frame = frame.loc[frame["date"] >= start]
+    if end is not None:
+        frame = frame.loc[frame["date"] <= end]
+    if frame.empty:
+        raise RuntimeError(
+            f"{parquet_root() / 'member_position.parquet'} 没有符合条件的会员持仓；禁止静默回退"
+        )
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
     for field in MEMBER_POSITION_FIELDS:
         frame[field] = pd.to_numeric(frame[field], errors="coerce")
     return frame.dropna(subset=["date", "symbol"]).drop_duplicates(
@@ -816,25 +790,27 @@ VENDOR_MAIN_REQUIRED = (
 )
 
 
-def _read_mongo_collection(collection: str, query: dict[str, Any], label: str,
-                           required: tuple[str, ...],
-                           fields: tuple[str, ...] | None = None) -> pd.DataFrame:
-    """读取规范集合。集合为空或缺字段时直接报错，不回退到其它集合。"""
-    from pymongo import MongoClient
-
-    projection: dict[str, int] = {"_id": 0}
-    if fields is not None:
-        projection.update({field: 1 for field in fields})
-    rows = list(MongoClient(MONGO_URI)[MONGO_DB][collection].find(
-        query, projection
-    ).sort("date_stamp", 1))
-    if not rows:
-        raise RuntimeError(f"{MONGO_DB}.{collection} 中没有 {label} 的数据；禁止自动回退")
-    frame = pd.DataFrame(rows)
-    missing = sorted(set(required) - set(frame.columns))
-    if missing:
-        raise ValueError(f"{MONGO_DB}.{collection} 缺少字段: {missing}")
+def _read_market_table(name: str, query_products: list[str] | None, start: str,
+                        end: str | None, label: str, required: tuple[str, ...],
+                        fields: tuple[str, ...] | None = None) -> pd.DataFrame:
+    """读取一张行情 Parquet。表为空或缺字段时直接报错，不回退。"""
+    frame = read_market_parquet(name)
     frame["date"] = pd.to_datetime(frame["date"])
+    if query_products is not None and "contract_object" in frame.columns:
+        wanted = {item.upper() for item in query_products}
+        frame = frame.loc[frame["contract_object"].astype(str).str.upper().isin(wanted)]
+    if start:
+        frame = frame.loc[frame["date"] >= pd.Timestamp(start)]
+    if end is not None:
+        frame = frame.loc[frame["date"] <= pd.Timestamp(end)]
+    if frame.empty:
+        raise RuntimeError(f"{parquet_root() / name} 中没有 {label} 的数据；禁止自动回退")
+    needed = fields or required
+    missing = sorted(set(needed) - set(frame.columns))
+    if missing:
+        raise ValueError(f"{parquet_root() / name} 缺少字段: {missing}")
+    if "date_stamp" in frame.columns:
+        frame = frame.sort_values("date_stamp")
     return frame.reset_index(drop=True)
 
 
@@ -852,12 +828,10 @@ def load_contract_full_panel(products: list[str], start: str, end: str | None = 
     这是研究入口，不参与账户回测；账户回测仍使用 ``load_contract_dataset``。
     ``fields`` 给定时只读取这些字段，并以它们作为必需字段校验。
     """
-    cfg = data_config()
-    collection = cfg.get("collections", {}).get("contract_full", "contract_day_full")
     upper = [str(p).upper() for p in products]
-    query = {"contract_object": {"$in": upper}, "date": _date_query(start, end)}
-    return _read_mongo_collection(
-        collection, query, f"{upper} 在 {start}~{end} 的全合约",
+    return _read_market_table(
+        "contract_day_full.parquet", upper, start, end,
+        f"{upper} 在 {start}~{end} 的全合约",
         fields or CONTRACT_FULL_REQUIRED, fields,
     )
 
@@ -867,11 +841,9 @@ def load_vendor_main_map(product: str, start: str, end: str | None = None) -> pd
 
     仅用于研究与对账，不能替代 ``price_data_research`` 作为账户回测主力。
     """
-    cfg = data_config()
-    collection = cfg.get("collections", {}).get("vendor_main_map", "vendor_main_map")
     key = str(product).upper()
-    query = {"contract_object": key, "date": _date_query(start, end)}
-    return _read_mongo_collection(
-        collection, query, f"{key} 在 {start}~{end} 的供应商主力映射",
-        VENDOR_MAIN_REQUIRED,
+    return _read_market_table(
+        "vendor_main_map.parquet", [key], start, end,
+        f"{key} 在 {start}~{end} 的供应商主力映射",
+        VENDOR_MAIN_REQUIRED, None,
     )
