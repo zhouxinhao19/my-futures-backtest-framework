@@ -569,42 +569,36 @@ def load_mongo_commodity_panel(
     return selected[columns]
 
 
-def load_mongo_basis_rates(
+def load_basis_rates(
     start: str | None = None,
     end: str | None = None,
     products: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Load `basis_rates` for the commodity research pool. Fail closed if empty."""
-    from pymongo import MongoClient
-
+    """读取研究主力 Parquet 的 basis_rate。没有符合条件的基差就停止。"""
     products = [
         str(item).upper().removesuffix("_MAIN")
         for item in (products or pool_symbols("commodity_xs"))
     ]
-    query: dict[str, Any] = {"symbol": {"$in": products}}
-    if start is not None or end is not None:
-        query["date"] = {}
-        if start is not None:
-            query["date"]["$gte"] = start
-        if end is not None:
-            query["date"]["$lte"] = end
-    with MongoClient(MONGO_URI) as client:
-        rows = list(
-            client[MONGO_DB].basis_rates.find(
-                query, {"_id": 0, "symbol": 1, "date": 1, "basis_rate": 1}
-            )
-        )
-    if not rows:
+    frame = read_market_parquet("research_panel.parquet")
+    frame = frame.loc[
+        frame["contract_object"].astype(str).str.upper().isin(products),
+        ["date", "contract_object", "basis_rate"],
+    ].copy()
+    frame["date"] = frame["date"].astype(str).str.slice(0, 10)
+    if start is not None:
+        frame = frame.loc[frame["date"] >= start]
+    if end is not None:
+        frame = frame.loc[frame["date"] <= end]
+    if frame.empty:
         raise RuntimeError(
-            f"{MONGO_DB}.basis_rates 没有符合条件的基差；禁止静默回退"
+            f"{parquet_root() / 'research_panel.parquet'} 没有符合条件的基差；禁止静默回退"
         )
-    frame = pd.DataFrame(rows)
     frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    frame["symbol"] = frame["symbol"].astype(str).str.upper()
+    frame["symbol"] = frame["contract_object"].astype(str).str.upper()
     frame["basis_rate"] = pd.to_numeric(frame["basis_rate"], errors="coerce")
     return frame.dropna(subset=["date", "symbol"]).drop_duplicates(
         ["date", "symbol"]
-    )
+    )[["date", "symbol", "basis_rate"]]
 
 
 def multiplier_map(
@@ -731,7 +725,9 @@ def _implied_multiplier(symbol: str, panel: pd.DataFrame | None) -> float | None
 
 
 def attach_basis_rates(panel: pd.DataFrame, basis: pd.DataFrame) -> pd.DataFrame:
-    out = panel.merge(basis, on=["date", "symbol"], how="left")
+    out = panel.drop(columns=["basis_rate"], errors="ignore").merge(
+        basis[["date", "symbol", "basis_rate"]], on=["date", "symbol"], how="left",
+    )
     if out["basis_rate"].notna().mean() < 0.80:
         raise RuntimeError("基差覆盖率低于 80%，禁止继续研究代理回测")
     return out

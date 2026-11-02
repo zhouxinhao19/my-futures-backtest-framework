@@ -2,13 +2,14 @@ mongo_uri: "mongodb://127.0.0.1:27017"
 mongo_db: "quantaxis_price_data"
 parquet_root: "local_data/market"
 
+# 记账标签。文件都在 parquet_root 下，读取不回退到 MongoDB。
 collections:
-  price_panel: "price_data_research"
-  volume_oi_panel: "price_data_research"
-  minute_bars: "future_5m"
-  member_position: "member_position_daily"
-  contract_full: "contract_day_full"
-  vendor_main_map: "vendor_main_map"
+  price_panel: "research_panel.parquet"
+  volume_oi_panel: "research_panel.parquet"
+  minute_bars: "minute"
+  member_position: "member_position.parquet"
+  contract_full: "contract_day_full.parquet"
+  vendor_main_map: "vendor_main_map.parquet"
 
 protocol:
   signal_price: "adj_close"
@@ -21,7 +22,7 @@ protocol:
   # 样本外是该日及之后的交易日，样本内是更早的交易日。
   oos_start: "2025-01-01"
 
-# 交易所合约代码前缀与品种名不同的历史别名（全合约 CSV 与 price_data_research 中观察到）。
+# 交易所合约代码前缀与品种名不同的历史别名（全合约 CSV 与研究主力中观察到）。
 # valid_until 取自 load_data1.csv 中该前缀最后出现的交易日；超过该日期出现别名前缀即报错。
 code_prefix_aliases:
   MA:
@@ -40,3 +41,11 @@ main_rules:
 source_policy:
   allow_fallback: false
   close_settle_fallback_source: "close_fallback"
+
+# 上期所、上期能源、大商所、郑商所自该日起把成交量、成交额、持仓改为单边。
+# 日频 Parquet 已按单边入库。5 分钟 Parquet 仍是公布口径，只在读取时把该日之前的双边数值除以 2。
+volume_convention:
+  single_sided_since: "2020-01-01"
+  fields: [volume, amount, oi]
+  minute_double_sided_exchanges: [SHF, SHFE, XSGE, DCE, XDCE, ZCE, CZCE, XZCE, INE, XSIE]
+  minute_always_single_exchanges: [CFFEX, CFX, CCFX]

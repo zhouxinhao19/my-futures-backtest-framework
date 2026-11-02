@@ -32,7 +32,7 @@ def write_research_run(output_dir: str | Path, metadata: dict[str, Any], result:
     directory.mkdir(parents=True, exist_ok=False)
     payload["initial_equity"] = payload.get("initial_equity", 100_000_000)
     payload["compound"] = bool(payload.get("compound", True))
-    payload["price_field"] = "adj_settle"
+    payload["price_field"] = payload.get("price_field", "adj_settle")
     payload["framework"] = "backtest"
     summary = sample_summary(daily)
     payload["samples"] = summary.to_dict(orient="records")
