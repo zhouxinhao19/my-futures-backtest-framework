@@ -22,7 +22,8 @@
 
 ## 口径
 
-- 数据库默认 `quantaxis_price_data`，集合见 `configs/data.yaml`。缺数据应报错，不静默换库。
+- Parquet 行情目录由 `configs/data.yaml` 指定。需要兼容旧 MongoDB 读取代码时，通过
+  `QA_MONGO_URI` 和 `QA_MONGO_DB` 环境变量提供连接信息，不把连接配置写入仓库。
 - 品种池只从 `configs/universe.yaml` 读取。
 - T 日信号由调用方用 `adj_close` 算完后传入。框架在 T+`signal_lag`（默认 1）用调用方给出的价格成交和盯市。
 - 研究标签收益是 `adj_settle[T+1+H] / adj_settle[T+1] - 1`，由 `research.protocol.forward_return` 计算。

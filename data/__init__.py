@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import warnings
 
 import pandas as pd
 import yaml
@@ -62,12 +61,16 @@ def config() -> dict[str, Any]:
     return _UNIVERSE_CACHE
 
 
+def _removed_csv_catalog() -> None:
+    raise RuntimeError(
+        "configs/universe.yaml 已删除早期 CSV 目录 data_root 和 symbols；"
+        "行情从 parquet_root 读取，交易规格在 products"
+    )
+
+
 def symbols() -> list[str]:
-    """返回配置中所有有主力 CSV 的品种。"""
-    return [
-        symbol for symbol, spec in config()["symbols"].items()
-        if spec.get("file")
-    ]
+    """早期主力 CSV 目录已删除。"""
+    _removed_csv_catalog()
 
 
 def pool_symbols(pool: str) -> list[str]:
@@ -75,78 +78,41 @@ def pool_symbols(pool: str) -> list[str]:
     versioned = (config().get("pools") or {}).get(pool)
     if isinstance(versioned, dict) and versioned.get("members"):
         return [str(symbol).upper() for symbol in versioned["members"]]
-    pools = config().get("pool_definitions", {})
-    if pool not in pools:
-        raise KeyError(f"未知品种池: {pool}")
-    return [str(symbol).upper() for symbol in pools[pool]]
+    raise KeyError(f"未知品种池: {pool}")
 
 
 def symbol_spec(symbol: str) -> dict[str, Any]:
-    """按品种代码读取交易规格。
-
-    品种池使用 ``AU`` 这类代码。``universe.yaml`` 里保留的 ``AU_MAIN``
-    只作为乘数、保证金和手续费规格的别名。
-    """
-    specs = config()["symbols"]
+    """按品种代码读取 ``universe.yaml`` 里 ``products`` 的交易规格。"""
     products = config().get("products") or {}
-    key = str(symbol).upper()
-    product_key = key.removesuffix("_MAIN")
-    if key in specs:
-        return specs[key]
-    alias = key if key.endswith("_MAIN") else f"{key}_MAIN"
-    if alias in specs:
-        if product_key not in products:
-            warnings.warn(
-                f"{alias} 是过渡别名，新代码请使用 products.{product_key}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        return specs[alias]
-    product = products.get(product_key)
+    key = str(symbol).upper().removesuffix("_MAIN")
+    product = products.get(key)
     if product and product.get("multiplier") is not None:
         multiplier = product["multiplier"]
         if isinstance(multiplier, list):
             multiplier = float(multiplier[-1]["value"])
-        return {**product, "multiplier": float(multiplier), "variety": product_key}
+        return {**product, "multiplier": float(multiplier), "variety": key}
     raise KeyError(f"{symbol} 不在 configs/universe.yaml 的交易规格中")
 
 
 def contract_symbols() -> list[str]:
-    """返回拥有全合约面板、可做具体合约账户的品种。"""
-    return [
-        symbol for symbol, spec in config()["symbols"].items()
-        if spec.get("data_mode") == "contract" and spec.get("panel_file")
-    ]
+    """早期全合约 CSV 目录已删除。"""
+    _removed_csv_catalog()
 
 
 def pool_main_symbols(pool: str, require_contract: bool = False) -> list[str]:
-    """将配置池产品代码映射为 universe.yaml 中的 *_MAIN 名称。"""
-    cfg = config()["symbols"]
-    result = []
-    for product in pool_symbols(pool):
-        name = product if product.endswith("_MAIN") else f"{product}_MAIN"
-        if name not in cfg:
-            continue
-        if require_contract and cfg[name].get("data_mode") != "contract":
-            continue
-        result.append(name)
-    return result
+    """早期 ``*_MAIN`` CSV 别名已删除。"""
+    del pool, require_contract
+    _removed_csv_catalog()
 
 
 def main_only_symbols() -> list[str]:
-    """返回只有主力序列、尚不能做真实合约账户的品种。"""
-    return [
-        symbol for symbol, spec in config()["symbols"].items()
-        if spec.get("data_mode") == "main_only"
-    ]
+    """早期主力代理 CSV 目录已删除。"""
+    _removed_csv_catalog()
 
 
 def load_main(symbol: str) -> pd.DataFrame:
-    cfg = config()
-    spec = cfg["symbols"][symbol]
-    df = pd.read_csv(Path(cfg["data_root"]) / spec["file"], parse_dates=["date"])
-    df = df.sort_values("date").drop_duplicates("date").set_index("date")
-    return df
+    del symbol
+    _removed_csv_catalog()
 
 
 def validate_contract_frame(frame: pd.DataFrame, symbol: str,
@@ -187,43 +153,9 @@ def load_main_map(
 
 
 def load_main_only_dataset(symbol: str, start: str, end: str) -> pd.DataFrame:
-    """读取没有全合约面板的主力序列。
-
-    该模式只用于主力因子/价格研究；settle 使用 close 作为代理，
-    不代表真实合约结算价，也不应被标记为 contract 模式。
-    """
-    cfg = config()
-    spec = cfg["symbols"][symbol]
-    frame = pd.read_csv(
-        Path(cfg["data_root"]) / spec["file"],
-        parse_dates=["date"],
-    )
-    frame = (
-        frame.sort_values("date")
-        .drop_duplicates("date")
-        .loc[lambda x: x["date"].between(start, end)]
-        .copy()
-    )
-    frame = normalize_market_columns(frame)
-    frame["contract"] = frame["contract"].astype(str).str.lower()
-    frame["code"] = frame["contract"]
-    frame["main_contract"] = frame["contract"]
-    frame["settle"] = pd.to_numeric(frame["close"], errors="coerce")
-    frame["pre_settle"] = frame["settle"].shift(1)
-    frame["position"] = pd.to_numeric(
-        frame.get("open_interest", pd.Series(index=frame.index)),
-        errors="coerce",
-    )
-    frame["trade"] = pd.to_numeric(
-        frame.get("volume", pd.Series(index=frame.index)),
-        errors="coerce",
-    )
-    return frame.dropna(subset=["date", "open", "close", "adj_close"])[
-        [
-            "date", "code", "main_contract", "open", "close", "adj_close",
-            "settle", "pre_settle", "position", "trade", "volume",
-        ]
-    ].reset_index(drop=True)
+    """早期主力 CSV 读取已删除。"""
+    del symbol, start, end
+    _removed_csv_catalog()
 
 
 def normalize_market_columns(frame: pd.DataFrame) -> pd.DataFrame:

@@ -1,156 +1,3 @@
-data_root: "C:/Users/59608/Desktop/ETF/data"
-pool_definitions:
-  all_symbols:
-    - JD
-    - CS
-    - AP
-    - CJ
-    - LH
-    - PK
-    - L
-    - TA
-    - MA
-    - BU
-    - PP
-    - EG
-    - UR
-    - EB
-    - PF
-    - PX
-    - FU
-    - ZC
-    - SC
-    - PG
-    - LU
-    - EC
-    - RU
-    - V
-    - FG
-    - SP
-    - NR
-    - SA
-    - BR
-    - SH
-    - A
-    - B
-    - M
-    - P
-    - Y
-    - OI
-    - RM
-    - RB
-    - J
-    - JM
-    - I
-    - HC
-    - SF
-    - SM
-    - SS
-    - C
-    - AL
-    - CU
-    - ZN
-    - PB
-    - NI
-    - SN
-    - BC
-    - SI
-    - AO
-    - LC
-    - AU
-    - AG
-    - CF
-    - SR
-  commodity_xs:
-    - CS
-    - AP
-    - CJ
-    - LH
-    - PK
-    - L
-    - TA
-    - MA
-    - BU
-    - PP
-    - EG
-    - UR
-    - EB
-    - PF
-    - PX
-    - FU
-    - SC
-    - PG
-    - LU
-    - RU
-    - V
-    - FG
-    - SP
-    - NR
-    - SA
-    - BR
-    - SH
-    - A
-    - B
-    - M
-    - P
-    - Y
-    - OI
-    - RM
-    - RB
-    - J
-    - JM
-    - I
-    - HC
-    - SF
-    - SM
-    - SS
-    - C
-    - AL
-    - CU
-    - ZN
-    - PB
-    - NI
-    - SN
-    - BC
-    - SI
-    - AO
-    - LC
-    - CF
-    - SR
-  account_core:
-    - AU
-    - SC
-    - TA
-    - CU
-    - RB
-symbols:
-  AU_MAIN: {variety: AU, file: au_main_real_contract.csv, panel_file: shfe_au_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 1000, margin_rate: 0.10, tick_size: 0.02, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 贵金属}
-  AG_MAIN: {variety: AG, file: ag_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 15, margin_rate: 0.12, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 贵金属}
-  CU_MAIN: {variety: CU, file: cu_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 5, margin_rate: 0.10, tick_size: 10.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 有色}
-  AL_MAIN: {variety: AL, file: al_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 5, margin_rate: 0.10, tick_size: 5.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 有色}
-  ZN_MAIN: {variety: ZN, file: zn_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 5, margin_rate: 0.10, tick_size: 5.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 有色}
-  NI_MAIN: {variety: NI, file: ni_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 1, margin_rate: 0.10, tick_size: 10.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 有色}
-  RB_MAIN: {variety: RB, file: rb_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 10, margin_rate: 0.10, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 黑色}
-  HC_MAIN: {variety: HC, file: hc_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 10, margin_rate: 0.10, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 黑色}
-  I_MAIN: {variety: I, file: i_main_real_contract.csv, data_mode: main_only, multiplier: 100, margin_rate: 0.12, tick_size: 0.5, commission_per_lot: 10, limit_pct: 0.08, quality: proxy, quality_note: DCE全合约面板待补, class: 黑色}
-  J_MAIN: {variety: J, file: j_main_real_contract.csv, data_mode: main_only, multiplier: 100, margin_rate: 0.10, tick_size: 0.5, commission_per_lot: 10, limit_pct: 0.08, quality: proxy, quality_note: DCE全合约面板待补, class: 黑色}
-  JM_MAIN: {variety: JM, file: jm_main_real_contract.csv, data_mode: main_only, multiplier: 60, margin_rate: 0.10, tick_size: 0.5, commission_per_lot: 10, limit_pct: 0.08, quality: proxy, quality_note: DCE全合约面板待补, class: 黑色}
-  M_MAIN: {variety: M, file: m_main_real_contract.csv, data_mode: main_only, multiplier: 10, margin_rate: 0.08, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: proxy, quality_note: DCE全合约面板待补, class: 农产品}
-  Y_MAIN: {variety: Y, file: y_main_real_contract.csv, data_mode: main_only, multiplier: 10, margin_rate: 0.08, tick_size: 2.0, commission_per_lot: 10, limit_pct: 0.06, quality: proxy, quality_note: DCE全合约面板待补, class: 农产品}
-  C_MAIN: {variety: C, file: c_main_real_contract.csv, data_mode: main_only, multiplier: 10, margin_rate: 0.08, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: proxy, quality_note: DCE全合约面板待补, class: 农产品}
-  TA_MAIN: {variety: TA, file: ta_main_real_contract.csv, panel_file: czce_agri_daily.csv, panel_source: CZCE, data_mode: contract, multiplier: 5, margin_rate: 0.08, tick_size: 2.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 能源化工}
-  SR_MAIN: {variety: SR, file: sr_main_real_contract.csv, data_mode: main_only, multiplier: 10, margin_rate: 0.08, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: proxy, quality_note: 郑商所SR全合约面板待补, class: 农产品}
-  CF_MAIN: {variety: CF, file: cf_main_real_contract.csv, data_mode: main_only, multiplier: 5, margin_rate: 0.08, tick_size: 5.0, commission_per_lot: 10, limit_pct: 0.06, quality: proxy, quality_note: 郑商所CF全合约面板待补, class: 农产品}
-  SC_MAIN: {variety: SC, file: sc_main_real_contract.csv, panel_file: ine_energy_daily.csv, panel_source: INE, data_mode: contract, multiplier: 1000, margin_rate: 0.10, tick_size: 0.1, commission_per_lot: 20, limit_pct: 0.08, quality: real_contract, class: 能源化工}
-  FU_MAIN: {variety: FU, file: fu_main_real_contract.csv, panel_file: shfe_commodity_daily.csv, panel_source: SHFE, data_mode: contract, multiplier: 10, margin_rate: 0.10, tick_size: 1.0, commission_per_lot: 10, limit_pct: 0.06, quality: real_contract, class: 能源化工}
-  TF_MAIN: {variety: TF, file: tf_main_real_contract.csv, panel_file: cffex_bond_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 10000, margin_rate: 0.02, tick_size: 0.005, commission_per_lot: 3, limit_pct: 0.02, quality: real_contract, class: 国债}
-  T_MAIN: {variety: T, file: t_main_real_contract.csv, panel_file: cffex_bond_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 10000, margin_rate: 0.02, tick_size: 0.005, commission_per_lot: 3, limit_pct: 0.02, quality: real_contract, class: 国债}
-  TS_MAIN: {variety: TS, file: ts_main_real_contract.csv, panel_file: cffex_bond_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 20000, margin_rate: 0.012, tick_size: 0.002, commission_per_lot: 3, limit_pct: 0.02, quality: real_contract, class: 国债}
-  IF_MAIN: {variety: IF, file: if_main_real_contract.csv, panel_file: cffex_index_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 300, margin_rate: 0.12, tick_size: 0.2, commission_per_lot: 23, limit_pct: 0.10, quality: real_contract, class: 股指}
-  IH_MAIN: {variety: IH, file: ih_main_real_contract.csv, panel_file: cffex_index_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 300, margin_rate: 0.12, tick_size: 0.2, commission_per_lot: 23, limit_pct: 0.10, quality: real_contract, class: 股指}
-  IC_MAIN: {variety: IC, file: ic_main_real_contract.csv, panel_file: cffex_index_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 200, margin_rate: 0.12, tick_size: 0.2, commission_per_lot: 23, limit_pct: 0.10, quality: real_contract, class: 股指}
-  IM_MAIN: {variety: IM, file: im_main_real_contract.csv, panel_file: cffex_index_daily.csv, panel_source: CFFEX, data_mode: contract, multiplier: 200, margin_rate: 0.12, tick_size: 0.2, commission_per_lot: 23, limit_pct: 0.10, quality: real_contract, class: 股指}
-
 # 按日期生效的合约乘数。来源是 research_panel.parquet 的成交额/(成交量*结算价)。
 products:
   CS:
@@ -377,6 +224,19 @@ products:
     exchange: CZCE
     multiplier: 10
     provenance: {multiplier: pdr_implied}
+
+  AU:
+    exchange: SHFE
+    multiplier: 1000
+    provenance: {multiplier: legacy_symbol_spec}
+  AG:
+    exchange: SHFE
+    multiplier: 15
+    provenance: {multiplier: legacy_symbol_spec}
+  IF:
+    exchange: CFFEX
+    multiplier: 300
+    provenance: {multiplier: legacy_symbol_spec}
 
 pools:
   all_symbols:

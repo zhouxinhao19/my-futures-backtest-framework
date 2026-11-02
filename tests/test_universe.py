@@ -13,7 +13,10 @@ def test_versioned_pool_matches_definition_and_exclusions():
     payload = yaml.safe_load((ROOT / "configs" / "universe.yaml").read_text(encoding="utf-8"))
     pool = payload["pools"]["commodity_xs"]
     assert pool["version"] == 1
-    assert pool["members"] == payload["pool_definitions"]["commodity_xs"]
+    assert pool["members"] == [
+        item for item in payload["pools"]["all_symbols"]["members"]
+        if item not in pool["exclusions"]
+    ]
     assert set(pool["exclusions"]) == {"AU", "AG", "JD", "ZC", "EC"}
     assert set(payload["pools"]["account_core"]["members"]) - set(pool["members"]) == {"AU"}
 

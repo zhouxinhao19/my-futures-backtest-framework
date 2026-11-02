@@ -9,7 +9,8 @@ def test_runtime_config_loads_execution_controls():
     assert isinstance(execution, ExecutionConfig)
     assert execution.slippage_ticks >= 0
     assert 0 < execution.margin_cap <= 1
-    assert "symbols" in universe
+    assert "pools" in universe
+    assert "products" in universe
 
 
 def test_manifest_hash_is_stable(tmp_path: Path):

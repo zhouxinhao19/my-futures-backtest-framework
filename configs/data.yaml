@@ -1,5 +1,3 @@
-mongo_uri: "mongodb://127.0.0.1:27017"
-mongo_db: "quantaxis_price_data"
 parquet_root: "local_data/market"
 
 # 记账标签。文件都在 parquet_root 下，读取不回退到 MongoDB。
@@ -31,16 +29,6 @@ code_prefix_aliases:
   ZC:
     - prefix: "tc"
       valid_until: "2016-04-08"
-
-main_rules:
-  contract_main: "etf_main"
-  research_price: "single_daily_contract"
-  volume_oi: "single_daily_contract"
-  vendor_main: "vendor_maincon"
-
-source_policy:
-  allow_fallback: false
-  close_settle_fallback_source: "close_fallback"
 
 # 上期所、上期能源、大商所、郑商所自该日起把成交量、成交额、持仓改为单边。
 # 日频 Parquet 已按单边入库。5 分钟 Parquet 仍是公布口径，只在读取时把该日之前的双边数值除以 2。

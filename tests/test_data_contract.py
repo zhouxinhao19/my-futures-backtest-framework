@@ -13,7 +13,7 @@ def test_canonical_database_and_pools():
     for product in account_core:
         spec = symbol_spec(product)
         assert spec["variety"] == product
-        assert spec["data_mode"] == "contract"
+        assert spec["multiplier"] > 0
 
 
 def test_available_at_does_not_cross_products(monkeypatch, tmp_path):

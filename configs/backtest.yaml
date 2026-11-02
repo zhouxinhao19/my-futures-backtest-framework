@@ -1,15 +1,6 @@
 initial_cash: 100000000
-frequency: daily
-direction: long_short
-signal_price: adj_close
-execution_price: settle
 signal_lag: 1
-target_vol: 0.15
-vol_window: 60
 max_symbol_notional: 1.0
-slippage_ticks: 1
 participation_rate: 0.10
-commission_per_lot_override: null
 allow_limit_fill: false
 mark_price: settle
-min_affordable_fraction: 0.5
