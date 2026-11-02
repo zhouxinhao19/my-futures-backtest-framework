@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 import pandas as pd
+from numba import njit
 
 from data import symbol_spec
 
@@ -105,6 +107,7 @@ def research_backtest(
     contracts: pd.DataFrame | None = None,
     long_weight: pd.DataFrame | None = None,
     short_weight: pd.DataFrame | None = None,
+    timings: dict[str, float] | None = None,
 ) -> ResearchResult:
     """正式研究回测。``compound=False`` 时每批仍用初始权益的一半。
 
@@ -136,12 +139,15 @@ def research_backtest(
     spans = _cohort_spans(cohort_holding, n)
     size_holding = 1 if spans is not None else holding
     codes = None if contracts is None else contracts.reindex(index=dates, columns=products).to_numpy(dtype=object)
+    sizing_started = time.perf_counter()
     if compound:
         lots = _compound_lots(
             long_mask, short_mask, values, mult, margin_rate, size_holding, lag, cost_bps, capital,
             require_both_legs=require_both_legs, cohort_holding=spans, allocation=allocation,
             execution=execution, codes=codes, long_weight=long_weight, short_weight=short_weight,
         )
+        if timings is not None:
+            timings["sizing"] = time.perf_counter() - sizing_started
     else:
         if leg_notional is None:
             budget = float(capital if allocation == "equal_active" else capital / 2)
@@ -154,11 +160,14 @@ def research_backtest(
             long_weight=long_weight, short_weight=short_weight,
         )
         lots = sized.to_numpy(float)
+        if timings is not None:
+            timings["sizing"] = time.perf_counter() - sizing_started
     if compound:
         zero_lot = np.zeros(n, dtype=int)
     daily, trades, positions = _account(
         lots, zero_lot, values, mult, margin_rate, dates, products, holding, lag, cost_bps, capital, compound,
         require_both_legs=require_both_legs, cohort_holding=spans, execution=execution, codes=codes,
+        timings=timings,
     )
     return ResearchResult(daily=daily, trades=trades, positions=positions)
 
@@ -317,6 +326,103 @@ def _compound_weight(
     return _weight_values(frame, dates, products)
 
 
+@njit(cache=True)
+def _compound_lots_numba(
+    lm: np.ndarray,
+    sm: np.ndarray,
+    values: np.ndarray,
+    mult: np.ndarray,
+    holding: int,
+    lag: int,
+    rate: float,
+    capital: float,
+    require_both_legs: bool,
+    roll: np.ndarray,
+) -> np.ndarray:
+    n, width = values.shape
+    lots = np.zeros((n, width), dtype=np.float64)
+    equity = capital
+    for day in range(n):
+        pnl = 0.0
+        cost = 0.0
+        start = day - (lag + holding + 1)
+        if start < 0:
+            start = 0
+        for signal in range(start, day):
+            age = day - signal
+            if lag + 1 <= age <= lag + holding:
+                for col in range(width):
+                    moved = values[day, col] - values[day - 1, col]
+                    if lots[signal, col] != 0.0 and np.isfinite(moved):
+                        pnl += lots[signal, col] * mult[col] * moved
+            if age == lag + 1:
+                entry_day = signal + lag
+                for col in range(width):
+                    if entry_day < n and np.isfinite(values[entry_day, col]):
+                        cost += abs(lots[signal, col]) * values[entry_day, col] * mult[col] * rate
+            if age == lag + holding + 1:
+                exit_day = signal + lag + holding
+                for col in range(width):
+                    if exit_day < n and np.isfinite(values[exit_day, col]):
+                        cost += abs(lots[signal, col]) * values[exit_day, col] * mult[col] * rate
+        if day > 0:
+            for col in range(width):
+                if roll[day, col]:
+                    previous = 0.0
+                    current = 0.0
+                    for signal in range(start, day):
+                        previous_age = day - 1 - signal
+                        current_age = day - signal
+                        if lag + 1 <= previous_age <= lag + holding:
+                            previous += lots[signal, col]
+                        if lag + 1 <= current_age <= lag + holding:
+                            current += lots[signal, col]
+                    base = (abs(previous) + abs(current)) * values[day - 1, col] * mult[col] * rate
+                    # Replace the per-symbol open/close costs on a roll day.
+                    for signal in range(start, day):
+                        age = day - signal
+                        if age == lag + 1:
+                            entry_day = signal + lag
+                            if entry_day < n and np.isfinite(values[entry_day, col]):
+                                cost -= abs(lots[signal, col]) * values[entry_day, col] * mult[col] * rate
+                        if age == lag + holding + 1:
+                            exit_day = signal + lag + holding
+                            if exit_day < n and np.isfinite(values[exit_day, col]):
+                                cost -= abs(lots[signal, col]) * values[exit_day, col] * mult[col] * rate
+                    cost += base
+        equity += pnl - cost
+        budget = max(equity, 0.0) * 0.5
+        long_count = 0
+        short_count = 0
+        entry_day = day + lag
+        for col in range(width):
+            valid = entry_day < n and np.isfinite(values[entry_day, col])
+            if valid and lm[day, col]:
+                long_count += 1
+            if valid and sm[day, col]:
+                short_count += 1
+        long_each = budget / holding / long_count if long_count > 0 else 0.0
+        short_each = budget / holding / short_count if short_count > 0 else 0.0
+        row_long = 0
+        row_short = 0
+        for col in range(width):
+            valid = entry_day < n and np.isfinite(values[entry_day, col])
+            if valid and lm[day, col]:
+                row_long += int(np.floor(long_each / (values[entry_day, col] * mult[col])))
+            if valid and sm[day, col]:
+                row_short += int(np.floor(short_each / (values[entry_day, col] * mult[col])))
+        if (require_both_legs and row_long > 0 and row_short > 0) or (
+            not require_both_legs and (row_long > 0 or row_short > 0)
+        ):
+            for col in range(width):
+                valid = entry_day < n and np.isfinite(values[entry_day, col])
+                if valid and lm[day, col]:
+                    lots[day, col] = np.floor(long_each / (values[entry_day, col] * mult[col]))
+                if valid and sm[day, col]:
+                    lots[day, col] -= np.floor(short_each / (values[entry_day, col] * mult[col]))
+    return lots
+
+
 def _compound_lots(
     long_mask: pd.DataFrame,
     short_mask: pd.DataFrame,
@@ -339,6 +445,31 @@ def _compound_lots(
 
     掩码和入场价只对齐一次。每一天只用当天权益计算这一行手数，公式与 ``_size_lots`` 相同。
     """
+    if (
+        cohort_holding is None
+        and allocation == "leg"
+        and execution == "cohort"
+        and long_weight is None
+        and short_weight is None
+        and _day_flow is _ORIGINAL_DAY_FLOW
+        and np.isfinite(values).all()
+        and not long_mask.isna().to_numpy().any()
+        and not short_mask.isna().to_numpy().any()
+    ):
+        lm, sm = _aligned_masks(long_mask, short_mask, long_mask.index, list(long_mask.columns))
+        roll = np.zeros(values.shape, dtype=np.bool_) if codes is None else _roll_mask(codes)
+        return _compound_lots_numba(
+            np.ascontiguousarray(lm),
+            np.ascontiguousarray(sm),
+            np.ascontiguousarray(values, dtype=np.float64),
+            np.ascontiguousarray(mult, dtype=np.float64),
+            int(holding),
+            int(lag),
+            float(cost_bps / 10_000.0),
+            float(capital),
+            bool(require_both_legs),
+            np.ascontiguousarray(roll),
+        )
     dates_n, n_products = values.shape
     dates = long_mask.index
     products = list(range(n_products))
@@ -458,6 +589,9 @@ def _day_flow(
     return pnl, cost
 
 
+_ORIGINAL_DAY_FLOW = _day_flow
+
+
 def _position_on_day(
     lots: np.ndarray,
     day: int,
@@ -498,7 +632,9 @@ def _account(
     cohort_holding: np.ndarray | None = None,
     execution: str = "cohort",
     codes: np.ndarray | None = None,
+    timings: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    account_started = time.perf_counter()
     n, n_products = lots.shape
     change = np.full_like(values, np.nan)
     change[1:] = values[1:] - values[:-1]
@@ -620,6 +756,9 @@ def _account(
         "equity_after": equity_after,
     }, index=dates)
     daily.loc[daily["cohorts"] == 0, ["ret", "gross_ret"]] = np.nan
+    if timings is not None:
+        timings["account_core"] = time.perf_counter() - account_started
+    output_started = time.perf_counter()
     if execution == "adjust":
         trades = _adjust_trades(held, values, mult, dates, products, rate)
     else:
@@ -629,6 +768,8 @@ def _account(
     if roll is not None:
         trades = _rewrite_roll_trades(trades, held, codes, values, mult, dates, products, rate, roll)
     positions = _positions(held, symbol_pnl, symbol_cost, values, mult, dates, products)
+    if timings is not None:
+        timings["trade_positions"] = time.perf_counter() - output_started
     return daily, trades, positions
 
 
@@ -724,13 +865,16 @@ def _rewrite_roll_trades(
     if "trade_date" in kept.columns:
         kept["trade_date"] = pd.to_datetime(kept["trade_date"])
     rows: list[dict[str, object]] = []
+    remove_keys: set[tuple[pd.Timestamp, str]] = set()
     for day in range(1, len(dates)):
         rolled = roll[day]
         if not np.any(rolled):
             continue
-        names = [products[col] for col in np.flatnonzero(rolled)]
         if not kept.empty:
-            kept = kept.loc[~((kept["trade_date"] == pd.Timestamp(dates[day])) & kept["symbol"].isin(names))]
+            trade_date = pd.Timestamp(dates[day])
+            remove_keys.update(
+                (trade_date, products[col]) for col in np.flatnonzero(rolled)
+            )
         price = values[day - 1]
         for col in np.flatnonzero(rolled):
             if not np.isfinite(price[col]):
@@ -758,6 +902,9 @@ def _rewrite_roll_trades(
                     "notional": notional,
                     "cost": notional * rate,
                 })
+    if remove_keys and not kept.empty:
+        keys = pd.MultiIndex.from_arrays([kept["trade_date"], kept["symbol"]])
+        kept = kept.loc[~keys.isin(remove_keys)]
     extra = pd.DataFrame(rows)
     if kept.empty:
         return extra
@@ -828,7 +975,23 @@ def _trades(
     cohort_ok: np.ndarray,
     cohort_holding: np.ndarray | None = None,
 ) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
+    columns = {
+        "cohort_date": [],
+        "symbol": [],
+        "side": [],
+        "action": [],
+        "trade_date": [],
+        "lots": [],
+        "price": [],
+        "multiplier": [],
+        "notional": [],
+        "cost": [],
+    }
+
+    def append_row(**values: object) -> None:
+        for key in columns:
+            columns[key].append(values[key])
+
     n = len(dates)
     for signal in range(n):
         if not cohort_ok[signal]:
@@ -849,34 +1012,20 @@ def _trades(
             if open_at < n and open_book < n and np.isfinite(values[open_at, col]):
                 price = float(values[open_at, col])
                 notional = shares * price * float(mult[col])
-                rows.append({
-                    "cohort_date": dates[signal],
-                    "symbol": symbol,
-                    "side": side,
-                    "action": "open",
-                    "trade_date": dates[open_book],
-                    "lots": shares,
-                    "price": price,
-                    "multiplier": float(mult[col]),
-                    "notional": notional,
-                    "cost": notional * rate,
-                })
+                append_row(
+                    cohort_date=dates[signal], symbol=symbol, side=side, action="open",
+                    trade_date=dates[open_book], lots=shares, price=price,
+                    multiplier=float(mult[col]), notional=notional, cost=notional * rate,
+                )
             if close_at < n and close_book < n and np.isfinite(values[close_at, col]):
                 price = float(values[close_at, col])
                 notional = shares * price * float(mult[col])
-                rows.append({
-                    "cohort_date": dates[signal],
-                    "symbol": symbol,
-                    "side": side,
-                    "action": "close",
-                    "trade_date": dates[close_book],
-                    "lots": shares,
-                    "price": price,
-                    "multiplier": float(mult[col]),
-                    "notional": notional,
-                    "cost": notional * rate,
-                })
-    return pd.DataFrame(rows)
+                append_row(
+                    cohort_date=dates[signal], symbol=symbol, side=side, action="close",
+                    trade_date=dates[close_book], lots=shares, price=price,
+                    multiplier=float(mult[col]), notional=notional, cost=notional * rate,
+                )
+    return pd.DataFrame(columns)
 
 
 def _positions(
@@ -888,22 +1037,29 @@ def _positions(
     dates: pd.Index,
     products: list[str],
 ) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
+    columns = {
+        "date": [],
+        "symbol": [],
+        "lots": [],
+        "notional": [],
+        "pnl": [],
+        "cost": [],
+    }
     for day, date in enumerate(dates):
         for col, symbol in enumerate(products):
             lot = float(held[day, col])
             if lot == 0 and symbol_pnl[day, col] == 0 and symbol_cost[day, col] == 0:
                 continue
             price = float(values[day, col]) if np.isfinite(values[day, col]) else float("nan")
-            rows.append({
-                "date": date,
-                "symbol": symbol,
-                "lots": lot,
-                "notional": abs(lot) * price * float(mult[col]) if np.isfinite(price) else float("nan"),
-                "pnl": float(symbol_pnl[day, col]),
-                "cost": float(symbol_cost[day, col]),
-            })
-    return pd.DataFrame(rows)
+            columns["date"].append(date)
+            columns["symbol"].append(symbol)
+            columns["lots"].append(lot)
+            columns["notional"].append(
+                abs(lot) * price * float(mult[col]) if np.isfinite(price) else float("nan")
+            )
+            columns["pnl"].append(float(symbol_pnl[day, col]))
+            columns["cost"].append(float(symbol_cost[day, col]))
+    return pd.DataFrame(columns)
 
 
 def delta_rebalance_backtest(
