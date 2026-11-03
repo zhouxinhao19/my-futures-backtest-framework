@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 _DATA_CONFIG_CACHE: dict[str, Any] | None = None
 _UNIVERSE_CACHE: dict[str, Any] | None = None
+_RESEARCH_PANEL_CACHE: pd.DataFrame | None = None
 
 
 def parquet_root() -> Path:
@@ -299,19 +300,33 @@ _RESEARCH_PROJECTION = {
 }
 
 
+def _research_panel_frame() -> pd.DataFrame:
+    """进程内缓存 research_panel.parquet，避免逐品种重复读盘。"""
+    global _RESEARCH_PANEL_CACHE
+    if _RESEARCH_PANEL_CACHE is None:
+        _RESEARCH_PANEL_CACHE = read_market_parquet("research_panel.parquet")
+    return _RESEARCH_PANEL_CACHE
+
+
+def clear_research_panel_cache() -> None:
+    """测试或重建 Parquet 后清空研究面板缓存。"""
+    global _RESEARCH_PANEL_CACHE
+    _RESEARCH_PANEL_CACHE = None
+
+
 def _fetch_research_rows(products: list[str], start: str, end: str | None) -> pd.DataFrame:
     """一次查出这些品种在研究主力 Parquet 里的选定主力。"""
     wanted = sorted({_product_code(symbol) for symbol in products})
     label = ",".join(wanted)
     try:
-        raw = read_market_parquet("research_panel.parquet")
+        base = _research_panel_frame()
+        raw = base.loc[base["contract_object"].astype(str).str.upper().isin(wanted)].copy()
     except RuntimeError:
         raise
     except Exception as exc:
         raise RuntimeError(
             f"{label} 读取研究主力 Parquet 失败；禁止自动回退到其它数据源"
         ) from exc
-    raw = raw[raw["contract_object"].astype(str).str.upper().isin(wanted)]
     if start is not None or end is not None:
         dates = raw["date"].astype(str).str.slice(0, 10)
         if start is not None:

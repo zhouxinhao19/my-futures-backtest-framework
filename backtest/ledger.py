@@ -108,6 +108,7 @@ def research_backtest(
     long_weight: pd.DataFrame | None = None,
     short_weight: pd.DataFrame | None = None,
     timings: dict[str, float] | None = None,
+    price_change: pd.DataFrame | None = None,
 ) -> ResearchResult:
     """正式研究回测。``compound=False`` 时每批仍用初始权益的一半。
 
@@ -134,8 +135,7 @@ def research_backtest(
     values = price.to_numpy(float)
     mult = np.array([float(specs[p]["multiplier"]) for p in products])
     margin_rate = np.array([float(specs[p]["margin_rate"]) for p in products])
-    change = np.full_like(values, np.nan)
-    change[1:] = values[1:] - values[:-1]
+    change = _price_change(values, price_change, dates, products)
     spans = _cohort_spans(cohort_holding, n)
     size_holding = 1 if spans is not None else holding
     codes = None if contracts is None else contracts.reindex(index=dates, columns=products).to_numpy(dtype=object)
@@ -145,6 +145,7 @@ def research_backtest(
             long_mask, short_mask, values, mult, margin_rate, size_holding, lag, cost_bps, capital,
             require_both_legs=require_both_legs, cohort_holding=spans, allocation=allocation,
             execution=execution, codes=codes, long_weight=long_weight, short_weight=short_weight,
+            change=change,
         )
         if timings is not None:
             timings["sizing"] = time.perf_counter() - sizing_started
@@ -167,9 +168,26 @@ def research_backtest(
     daily, trades, positions = _account(
         lots, zero_lot, values, mult, margin_rate, dates, products, holding, lag, cost_bps, capital, compound,
         require_both_legs=require_both_legs, cohort_holding=spans, execution=execution, codes=codes,
-        timings=timings,
+        timings=timings, change=change,
     )
     return ResearchResult(daily=daily, trades=trades, positions=positions)
+
+
+def _price_change(
+    values: np.ndarray,
+    price_change: pd.DataFrame | None,
+    dates: pd.Index,
+    products: list,
+) -> np.ndarray:
+    """盯市价差。缺省为价格差分；账户回测传入已剔除换月价差的差分。"""
+    if price_change is None:
+        change = np.full_like(values, np.nan)
+        change[1:] = values[1:] - values[:-1]
+        return change
+    aligned = price_change.reindex(index=dates, columns=products).to_numpy(float)
+    if aligned.shape != values.shape:
+        raise ValueError("price_change 与价格矩阵形状不一致")
+    return aligned
 
 
 def _weight_values(weight: pd.DataFrame, dates: pd.Index, products: list) -> np.ndarray:
@@ -338,6 +356,7 @@ def _compound_lots_numba(
     capital: float,
     require_both_legs: bool,
     roll: np.ndarray,
+    moves: np.ndarray,
 ) -> np.ndarray:
     n, width = values.shape
     lots = np.zeros((n, width), dtype=np.float64)
@@ -352,7 +371,7 @@ def _compound_lots_numba(
             age = day - signal
             if lag + 1 <= age <= lag + holding:
                 for col in range(width):
-                    moved = values[day, col] - values[day - 1, col]
+                    moved = moves[day, col]
                     if lots[signal, col] != 0.0 and np.isfinite(moved):
                         pnl += lots[signal, col] * mult[col] * moved
             if age == lag + 1:
@@ -440,11 +459,15 @@ def _compound_lots(
     codes: np.ndarray | None = None,
     long_weight: pd.DataFrame | None = None,
     short_weight: pd.DataFrame | None = None,
+    change: np.ndarray | None = None,
 ) -> np.ndarray:
     """按信号日收盘后的权益逐批定手。当天盈亏只来自更早的批次。
 
     掩码和入场价只对齐一次。每一天只用当天权益计算这一行手数，公式与 ``_size_lots`` 相同。
     """
+    if change is None:
+        change = np.full_like(values, np.nan)
+        change[1:] = values[1:] - values[:-1]
     if (
         cohort_holding is None
         and allocation == "leg"
@@ -469,6 +492,7 @@ def _compound_lots(
             float(capital),
             bool(require_both_legs),
             np.ascontiguousarray(roll),
+            np.ascontiguousarray(change, dtype=np.float64),
         )
     dates_n, n_products = values.shape
     dates = long_mask.index
@@ -494,8 +518,6 @@ def _compound_lots(
     lots = np.zeros_like(values)
     equity = float(capital)
     rate = cost_bps / 10_000.0
-    change = np.full_like(values, np.nan)
-    change[1:] = values[1:] - values[:-1]
     share = 1.0 if allocation == "equal_active" else 0.5
     roll = None if codes is None else _roll_mask(codes)
     for day in range(dates_n):
@@ -633,11 +655,13 @@ def _account(
     execution: str = "cohort",
     codes: np.ndarray | None = None,
     timings: dict[str, float] | None = None,
+    change: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     account_started = time.perf_counter()
     n, n_products = lots.shape
-    change = np.full_like(values, np.nan)
-    change[1:] = values[1:] - values[:-1]
+    if change is None:
+        change = np.full_like(values, np.nan)
+        change[1:] = values[1:] - values[:-1]
     entry = np.full_like(values, np.nan)
     entry[: n - lag] = values[lag:]
     unit = np.where(np.isfinite(entry), entry * mult, np.nan)
@@ -1075,6 +1099,7 @@ def delta_rebalance_backtest(
     compound: bool = True,
     contracts: pd.DataFrame | None = None,
     weights: pd.DataFrame | None = None,
+    price_change: pd.DataFrame | None = None,
 ) -> ResearchResult:
     """周频调仓只交易目标手数和现有手数的差额。
 
@@ -1110,8 +1135,7 @@ def delta_rebalance_backtest(
         )
     mult = np.array([float(specs[p]["multiplier"]) for p in products])
     margin_rate = np.array([float(specs[p]["margin_rate"]) for p in products])
-    change = np.full_like(values, np.nan)
-    change[1:] = values[1:] - values[:-1]
+    change = _price_change(values, price_change, dates, products)
     signal_idx = np.flatnonzero(spans > 0)
     executions: dict[int, int | None] = {}
     for signal in signal_idx:

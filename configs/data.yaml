@@ -1,3 +1,5 @@
+mongo_uri: "mongodb://127.0.0.1:27017"
+mongo_db: "quantaxis_price_data"
 parquet_root: "local_data/market"
 
 # 记账标签。文件都在 parquet_root 下，读取不回退到 MongoDB。
@@ -10,6 +12,8 @@ collections:
   vendor_main_map: "vendor_main_map.parquet"
 
 protocol:
+  # research：后复权 adj_settle 连续记账。account：原始 settle 成交和盯市，换月价差不进盈亏。
+  book: account
   signal_price: "adj_close"
   research_execution_price: "adj_settle"
   account_execution_price: "settle"

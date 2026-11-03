@@ -79,10 +79,15 @@ def raw_change_without_roll_gap(
             if isinstance(loc, slice) or loc == 0:
                 continue
             previous = settle.index[loc - 1]
-            old = infer_old_settle(
-                float(settle.at[previous, symbol]),
-                float(adj_settle.at[day, symbol]),
-                float(adj_settle.at[previous, symbol]),
-            )
+            try:
+                old = infer_old_settle(
+                    float(settle.at[previous, symbol]),
+                    float(adj_settle.at[day, symbol]),
+                    float(adj_settle.at[previous, symbol]),
+                )
+            except ValueError:
+                # 换月前后 settle/adj_settle 不完整时无法剔除价差，当日该品种盯市变化置 0。
+                change.at[day, symbol] = 0.0
+                continue
             change.at[day, symbol] = old - float(settle.at[previous, symbol])
     return change

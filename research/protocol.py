@@ -45,9 +45,40 @@ def lag_factor(
     return frame.groupby(group_column, sort=False)[factor_column].shift(lag)
 
 
+def book_mode() -> str:
+    """研究连续价或账户原始结算价。缺省保持研究口径。"""
+    book = str(protocol_config().get("book", "research")).strip().lower()
+    if book not in {"research", "account"}:
+        raise ValueError(f"protocol.book 只能是 research 或 account，收到 {book}")
+    return book
+
+
 def execution_price_column() -> str:
+    """研究标签仍用后复权成交价，不随账户账本切换。"""
     cfg = protocol_config()
     return str(cfg.get("research_execution_price", cfg.get("execution_price", "adj_settle")))
+
+
+def ledger_execution_column() -> str:
+    """回测定手和成交使用的价格列。"""
+    cfg = protocol_config()
+    if book_mode() == "account":
+        column = str(cfg.get("account_execution_price") or "").strip()
+        if not column:
+            raise ValueError("账户回测需要 protocol.account_execution_price")
+        return column
+    return execution_price_column()
+
+
+def ledger_mark_column() -> str:
+    """回测盯市价格列。账户账本与成交列同为原始结算价。"""
+    cfg = protocol_config()
+    if book_mode() == "account":
+        column = str(cfg.get("account_mark_price") or "").strip()
+        if not column:
+            raise ValueError("账户回测需要 protocol.account_mark_price")
+        return column
+    return execution_price_column()
 
 
 def forward_return(
@@ -108,15 +139,26 @@ def sample_split(
 
 def protocol_metadata(frequency: str = "daily") -> dict[str, Any]:
     cfg = protocol_config()
+    book = book_mode()
+    exec_col = ledger_execution_column()
+    mark_col = ledger_mark_column()
+    if book == "account":
+        definition = (
+            f"{exec_col} 成交并按名义金额定手，{mark_col} 盯市；"
+            "换月日用 adj_settle 比值剔除价差，价差不进盈亏"
+        )
+    else:
+        definition = (
+            f"{execution_price_column()}[T+1+H] / "
+            f"{execution_price_column()}[T+1] - 1"
+        )
     return {
+        "book": book,
         "signal_price": cfg.get("signal_price", "adj_close"),
-        "execution_price": execution_price_column(),
-        "mark_price": cfg.get("mark_price", "settle"),
+        "execution_price": exec_col,
+        "mark_price": mark_col,
         "signal_lag": signal_lag(),
         "oos_start": oos_start(),
         "annualization": annualization(frequency),
-        "return_definition": (
-            f"{execution_price_column()}[T+1+H] / "
-            f"{execution_price_column()}[T+1] - 1"
-        ),
+        "return_definition": definition,
     }
