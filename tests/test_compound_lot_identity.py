@@ -263,6 +263,7 @@ def _full_history_flow(
         adjusted = ledger._roll_symbol_cost(
             traded, previous, current, price, mult, rate,
             previous_code=codes[day - 1], current_code=codes[day],
+            open_price=values[day],
         )
         return pnl, float(np.nansum(adjusted))
     if symbol_cost is not None and day > 0:
@@ -272,6 +273,7 @@ def _full_history_flow(
         symbol_cost = ledger._roll_symbol_cost(
             symbol_cost, previous, current, price, mult, rate,
             previous_code=codes[day - 1], current_code=codes[day],
+            open_price=values[day],
         )
         cost = float(np.nansum(symbol_cost))
     return pnl, cost

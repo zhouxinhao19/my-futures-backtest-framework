@@ -1,8 +1,9 @@
 # 商品期货回测框架
 
 这是从 `D:\回测框架测试` 分支 `refactor/framework`（`3439dcc`）剥离出的交易框架。
-原仓库没有改动。这里只保留行情读取、时点协议、定手记账、换月成本和标准落盘。
-因子、策略、研究信号、实验脚本和历史结果不在本目录。
+原仓库没有改动。这里保留行情读取、时点协议、定手记账、换月成本、标准落盘，以及
+把外部因子表转换为交易掩码所需的最小执行适配器。
+因子公式、因子注册表、实验脚本和历史结果不在本目录。
 
 调用方向是单向的：外部代码算出多空掩码或权重，再交给本框架执行。
 框架不识别因子编号，也不生成交易信号。
@@ -18,6 +19,9 @@
 | `backtest/ledger.py` | 按名义金额定手、重叠持仓、滑点手续费、换月成本 |
 | `backtest/records.py` | 写出 `run.json`、`daily.csv`、`trades.csv`、`positions.csv`、`summary.csv` |
 | `backtest/reconcile.py` | 换月价差不计入盈亏的对照 |
+| `backtest/masks.py` | 时序和截面因子值转多空掩码 |
+| `factors/signals/liquidity.py` | 主力成交额流动性过滤 |
+| `strategies/schedule.py`、`strategies/factor_file.py` | 日历调仓和周频因子文件适配 |
 | `validation/` | 样本切分、试验登记和稳健性表 |
 
 ## 口径
@@ -53,6 +57,14 @@ write_research_run("runs/example", metadata, result)
 
 `price` 是成交和盯市用的价格。研究标签用后复权结算价，账户成交用原始结算价，两套价格不要混在同一次记账里。
 `metadata` 须包含 `research.repro.RUN_CONTRACT_FIELDS` 里的数据契约字段。
+
+外部因子接入时，调用顺序必须固定为：先计算日期 × 品种因子表，再用
+`factors.signals.liquidity.research_main_liquidity_mask` 做主力流动性过滤，
+然后用 `backtest.masks.long_short_masks` 生成多空掩码。日频调仓用
+`strategies.schedule.gate_signal_days`；周频调仓用
+`strategies.factor_file.apply_weekly_rebalance`，最后交给
+`research_backtest` 或 `delta_rebalance_backtest`。因子表代表 T 日收盘信号，
+不要在调用方自行移位，成交滞后由账本的 `lag` 处理。
 
 ## 安装与测试
 

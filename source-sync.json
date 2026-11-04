@@ -1,9 +1,13 @@
 {
-  "source": "caf5f6c990d5f050f660352f9af59bfe62908d87",
+  "source": "1ecc3c2df1c6ac26e61b750c3c37df7ff57c9aa6",
   "skipped": [
     {
       "path": "tests/test_backtest_speed.py",
       "reason": "测试引用了 profile_backtest_speed"
+    },
+    {
+      "path": "tests/test_week_end_delta.py",
+      "reason": "测试引用了 backtest.run"
     }
   ]
 }

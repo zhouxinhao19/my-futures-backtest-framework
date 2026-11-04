@@ -117,7 +117,8 @@ def research_backtest(
     定手不再按持有天数把资金拆开。
     ``execution="cohort"`` 时每一批单独开仓、到期整批平仓。
     ``execution="adjust"`` 时把同时持有的批次轧成净手数，只对净手数变化收取成本。
-    ``contracts`` 给出每天的主力合约代码。代码变化且仍有持仓时，按平掉旧合约、开回新合约计成本，换月价差不进盈亏。
+    ``contracts`` 给出每天的主力合约代码。账户换月日盯市仍只反映旧合约涨跌，
+    换月后按旧名义在新 settle 上重算手数，并按平旧、开新各计一次成本。
     """
     if allocation not in {"leg", "equal_active"}:
         raise ValueError("allocation 只能是 leg 或 equal_active")
@@ -149,6 +150,7 @@ def research_backtest(
         )
         if timings is not None:
             timings["sizing"] = time.perf_counter() - sizing_started
+        zero_lot = np.zeros(n, dtype=int)
     else:
         if leg_notional is None:
             budget = float(capital if allocation == "equal_active" else capital / 2)
@@ -163,12 +165,11 @@ def research_backtest(
         lots = sized.to_numpy(float)
         if timings is not None:
             timings["sizing"] = time.perf_counter() - sizing_started
-    if compound:
-        zero_lot = np.zeros(n, dtype=int)
+    roll_resize = price_change is not None and codes is not None
     daily, trades, positions = _account(
         lots, zero_lot, values, mult, margin_rate, dates, products, holding, lag, cost_bps, capital, compound,
         require_both_legs=require_both_legs, cohort_holding=spans, execution=execution, codes=codes,
-        timings=timings, change=change,
+        timings=timings, change=change, roll_resize=roll_resize,
     )
     return ResearchResult(daily=daily, trades=trades, positions=positions)
 
@@ -598,6 +599,7 @@ def _day_flow(
             return pnl, float(np.nansum(traded))
         symbol_cost = _roll_symbol_cost(
             traded, previous, current, price, mult, rate, rolled=rolled,
+            open_price=values[day],
         )
         return pnl, float(np.nansum(symbol_cost))
     if symbol_cost is not None and day > 0:
@@ -606,6 +608,7 @@ def _day_flow(
         price = values[day - 1]
         symbol_cost = _roll_symbol_cost(
             symbol_cost, previous, current, price, mult, rate, rolled=rolled,
+            open_price=values[day],
         )
         cost = float(np.nansum(symbol_cost))
     return pnl, cost
@@ -656,6 +659,7 @@ def _account(
     codes: np.ndarray | None = None,
     timings: dict[str, float] | None = None,
     change: np.ndarray | None = None,
+    roll_resize: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     account_started = time.perf_counter()
     n, n_products = lots.shape
@@ -680,7 +684,88 @@ def _account(
     symbol_cost = np.zeros_like(lots)
     held = np.zeros_like(lots)
     rate = cost_bps / 10_000.0
-    if cohort_holding is None:
+    resize_holding = 1 if cohort_holding is not None else holding
+    if roll_resize:
+        if codes is None:
+            raise ValueError("roll_resize 需要 contracts 代码矩阵")
+        from backtest.reconcile import apply_roll_lot_resize_for_day
+
+        lots_work = np.array(lots, dtype=float, copy=True)
+        roll = _roll_mask(codes)
+        exit_price = np.full_like(values, np.nan)
+        exit_price[: n - lag - resize_holding] = values[lag + resize_holding :]
+        exit_notional_w = np.nansum(np.abs(lots_work) * np.nan_to_num(exit_price) * mult, axis=1)
+        for day in range(n):
+            if cohort_holding is None:
+                for offset in range(lag + 1, lag + holding + 1):
+                    signal = day - offset
+                    if signal < 0:
+                        continue
+                    moved = change[day]
+                    raw = lots_work[signal] * mult * moved
+                    finite = np.isfinite(raw)
+                    pnl[day] += float(np.nansum(np.where(finite, raw, 0.0)))
+                    symbol_pnl[day] += np.where(finite, raw, 0.0)
+                    missing[day] += int(((lots_work[signal] != 0) & ~np.isfinite(moved)).sum())
+                    notional[day] += notional_t[signal]
+                    margin[day] += margin_t[signal]
+                    cohorts[day] += cohort_ok[signal]
+            else:
+                for signal in range(n):
+                    span = int(cohort_holding[signal])
+                    if span < 1 or not cohort_ok[signal]:
+                        continue
+                    age = day - signal
+                    if not (lag + 1 <= age <= lag + span):
+                        continue
+                    moved = change[day]
+                    raw = lots_work[signal] * mult * moved
+                    finite = np.isfinite(raw)
+                    pnl[day] += float(np.nansum(np.where(finite, raw, 0.0)))
+                    symbol_pnl[day] += np.where(finite, raw, 0.0)
+                    missing[day] += int(((lots_work[signal] != 0) & ~np.isfinite(moved)).sum())
+                    notional[day] += notional_t[signal]
+                    margin[day] += margin_t[signal]
+                    cohorts[day] += 1
+            if day > 0 and roll[day].any():
+                apply_roll_lot_resize_for_day(
+                    lots_work, day, codes, values, mult,
+                    lag=lag, holding=resize_holding, cohort_holding=cohort_holding,
+                )
+            held[day] = _position_on_day(
+                lots_work, day, resize_holding, lag, cohort_holding,
+            )
+        if execution == "cohort":
+            if cohort_holding is None:
+                entry_h = lag + 1
+                if entry_h < n:
+                    opened = np.zeros_like(lots_work)
+                    opened[entry_h:] = np.abs(lots_work[: n - entry_h]) * np.nan_to_num(entry[: n - entry_h]) * mult * rate
+                    symbol_cost += opened
+                    cost[entry_h:] += notional_t[: n - entry_h] * rate
+                exit_h = lag + holding + 1
+                if exit_h < n:
+                    closed = np.zeros_like(lots_work)
+                    closed[exit_h:] = np.abs(lots_work[: n - exit_h]) * np.nan_to_num(exit_price[: n - exit_h]) * mult * rate
+                    symbol_cost += closed
+                    cost[exit_h:] += exit_notional_w[: n - exit_h] * rate
+            else:
+                for signal in range(n):
+                    span = int(cohort_holding[signal])
+                    if span < 1 or not cohort_ok[signal]:
+                        continue
+                    entry_day = signal + lag + 1
+                    if entry_day < n and signal + lag < n:
+                        opened = np.abs(lots_work[signal]) * np.nan_to_num(entry[signal]) * mult * rate
+                        symbol_cost[entry_day] += opened
+                        cost[entry_day] += float(opened.sum())
+                    exit_at = signal + lag + span
+                    exit_day = exit_at + 1
+                    if exit_day < n and exit_at < n:
+                        closed = np.abs(lots_work[signal]) * np.nan_to_num(values[exit_at]) * mult * rate
+                        symbol_cost[exit_day] += closed
+                        cost[exit_day] += float(closed.sum())
+    elif cohort_holding is None:
         exit_price = np.full_like(values, np.nan)
         exit_price[: n - lag - holding] = values[lag + holding :]
         exit_notional = np.nansum(np.abs(lots) * np.nan_to_num(exit_price) * mult, axis=1)
@@ -834,21 +919,27 @@ def _roll_symbol_cost(
     base: np.ndarray,
     previous_pos: np.ndarray,
     current_pos: np.ndarray,
-    price: np.ndarray,
+    close_price: np.ndarray,
     mult: np.ndarray,
     rate: float,
     rolled: np.ndarray | None = None,
     previous_code: np.ndarray | None = None,
     current_code: np.ndarray | None = None,
+    open_price: np.ndarray | None = None,
 ) -> np.ndarray:
-    """换月日用平旧开新替换该品种当天的原交易成本。"""
+    """换月日用平旧开新替换该品种当天的原交易成本。平仓用 close_price，开仓用 open_price。"""
     if rolled is None:
         if previous_code is None or current_code is None:
             raise ValueError("换月成本需要换月掩码或相邻两日的合约代码")
         rolled = _code_changed(previous_code, current_code)
     if not np.any(rolled):
         return base
-    amount = (np.abs(previous_pos) + np.abs(current_pos)) * np.nan_to_num(price) * mult * rate
+    if open_price is None:
+        open_price = close_price
+    amount = (
+        np.abs(previous_pos) * np.nan_to_num(close_price)
+        + np.abs(current_pos) * np.nan_to_num(open_price)
+    ) * mult * rate
     out = np.array(base, dtype=float, copy=True)
     out[rolled] = amount[rolled]
     return out
@@ -866,6 +957,7 @@ def _roll_book_cost(
     for day in range(1, len(held)):
         out[day] = _roll_symbol_cost(
             out[day], held[day - 1], held[day], values[day - 1], mult, rate, rolled=roll[day],
+            open_price=values[day],
         )
     return out
 
@@ -899,21 +991,23 @@ def _rewrite_roll_trades(
             remove_keys.update(
                 (trade_date, products[col]) for col in np.flatnonzero(rolled)
             )
-        price = values[day - 1]
+        price_close = values[day - 1]
+        price_open = values[day]
         for col in np.flatnonzero(rolled):
-            if not np.isfinite(price[col]):
+            close_px = price_close[col]
+            open_px = price_open[col]
+            if not np.isfinite(close_px):
                 continue
-            px = float(price[col])
             previous = float(held[day - 1, col])
             current = float(held[day, col])
-            for lots, action, side in (
-                (previous, "roll_close", "sell" if previous > 0 else "buy"),
-                (current, "roll_open", "buy" if current > 0 else "sell"),
+            for lots, action, side, px in (
+                (previous, "roll_close", "sell" if previous > 0 else "buy", close_px),
+                (current, "roll_open", "buy" if current > 0 else "sell", open_px),
             ):
-                if lots == 0:
+                if lots == 0 or not np.isfinite(px):
                     continue
                 shares = abs(lots)
-                notional = shares * px * float(mult[col])
+                notional = shares * float(px) * float(mult[col])
                 rows.append({
                     "cohort_date": dates[day],
                     "symbol": products[col],
@@ -1106,7 +1200,8 @@ def delta_rebalance_backtest(
     信号日按当时权益为有信号的品种等权定下目标手数。下一个交易日的结算价成交。
     成交日当天的涨跌仍算在旧仓上，新仓从再下一个交易日开始计盈亏。
     样本最后一批仓位在计划退出日平掉。
-    ``contracts`` 给出每天的主力合约代码。代码变化且仍有持仓时，按平掉旧合约、开回新合约计成本，换月价差不进盈亏。
+    ``contracts`` 给出每天的主力合约代码。账户换月日盯市仍只反映旧合约涨跌，
+    换月后按旧名义在新 settle 上重算手数，并按平旧、开新各计一次成本。
     ``weights`` 给出信号日的目标名义占权益比例，含正负号。给出后不再把权益等分给有信号的品种。
     """
     if lag < 1:
@@ -1173,11 +1268,16 @@ def delta_rebalance_backtest(
         day_pnl = float(np.nansum(np.where(finite, raw, 0.0)))
         symbol_pnl[day] = np.where(finite, raw, 0.0)
         missing[day] = int(((position != 0) & ~np.isfinite(moved)).sum())
+        if price_change is not None and roll is not None and day > 0 and roll[day].any():
+            from backtest.reconcile import apply_roll_position_resize_for_day
+
+            apply_roll_position_resize_for_day(position, day, codes, values, mult)
         held[day] = position
         if roll is not None and day > 0:
             scheduled_cost[day] = _roll_symbol_cost(
                 scheduled_cost[day], held[day - 1], held[day],
                 values[day - 1], mult, rate, rolled=roll[day],
+                open_price=values[day],
             )
         day_cost_vec = scheduled_cost[day]
         day_cost = float(day_cost_vec.sum())

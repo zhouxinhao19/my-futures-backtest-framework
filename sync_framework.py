@@ -20,7 +20,26 @@ DEST = Path(__file__).resolve().parent
 STATE = DEST / "source-sync.json"
 DEFAULT_SOURCE = Path(r"D:\回测框架测试")
 
-BACKTEST_FILES = {"__init__.py", "ledger.py", "records.py", "reconcile.py"}
+BACKTEST_FILES = {
+    "__init__.py",
+    "ledger.py",
+    "masks.py",
+    "records.py",
+    "reconcile.py",
+}
+EXECUTION_FILES = {
+    "factors/signals/__init__.py",
+    "factors/signals/external_factor.py",
+    "factors/signals/liquidity.py",
+    "strategies/factor_file.py",
+    "strategies/schedule.py",
+}
+EXECUTION_TESTS = {
+    "tests/test_external_factor.py",
+    "tests/test_factor_file_strategy.py",
+    "tests/test_liquidity.py",
+    "tests/test_masks.py",
+}
 RESEARCH_EXCLUDE = {"__init__.py", "experiments.py"}
 CONFIGS = {
     "configs/data.yaml",
@@ -43,6 +62,8 @@ def git(repo: Path, *args: str) -> str:
 
 
 def allowed(path: str) -> bool:
+    if path in EXECUTION_FILES or path in EXECUTION_TESTS:
+        return True
     if path.startswith(("research/signals/", "factors/", "strategies/", "scripts/", "runs/", "reports/")):
         return False
     if path.startswith("data/") or path.startswith("validation/"):
@@ -74,6 +95,8 @@ def parse_diff(text: str) -> list[tuple[str, str]]:
 def blocked_reason(repo: Path, rev: str, path: str) -> str | None:
     """返回跳过原因。研究内容返回 ``ignore``，不写入同步状态。"""
     if not path.startswith("tests/"):
+        return None
+    if path in EXECUTION_TESTS:
         return None
     try:
         text = git(repo, "show", f"{rev}:{path}")
@@ -144,6 +167,8 @@ def main() -> None:
         for code, path in parse_diff(diff):
             if allowed(path):
                 seen[path] = code
+    for path in EXECUTION_FILES:
+        seen.setdefault(path, "M")
     for item in state.get("skipped") or []:
         seen.setdefault(item["path"], "M")
 

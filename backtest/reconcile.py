@@ -91,3 +91,103 @@ def raw_change_without_roll_gap(
                 continue
             change.at[day, symbol] = old - float(settle.at[previous, symbol])
     return change
+
+
+def _code_blank(value: object) -> bool:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return True
+    text = str(value).strip().lower()
+    return text in {"", "nan", "none"}
+
+
+def apply_roll_lot_resize_for_day(
+    lots: np.ndarray,
+    day: int,
+    codes: np.ndarray,
+    values: np.ndarray,
+    mult: np.ndarray,
+    *,
+    lag: int,
+    holding: int,
+    cohort_holding: np.ndarray | None,
+) -> None:
+    """在换月日 ``day`` 结束后，把仍持有中的各批手数按旧名义在新 settle 上重算。"""
+    if day <= 0 or day >= codes.shape[0]:
+        return
+    span_cap = holding if cohort_holding is None else int(np.max(cohort_holding))
+    start = max(0, day - lag - span_cap)
+    for col in range(codes.shape[1]):
+        previous_code = codes[day - 1, col]
+        current_code = codes[day, col]
+        if _code_blank(previous_code) or _code_blank(current_code):
+            continue
+        if str(previous_code) == str(current_code):
+            continue
+        prev_px = values[day - 1, col]
+        new_px = values[day, col]
+        if not (np.isfinite(prev_px) and np.isfinite(new_px) and new_px != 0):
+            continue
+        unit_old = float(prev_px) * float(mult[col])
+        unit_new = float(new_px) * float(mult[col])
+        for signal in range(start, day + 1):
+            span = holding if cohort_holding is None else int(cohort_holding[signal])
+            if span < 1:
+                continue
+            age = day - signal
+            if not (lag + 1 <= age <= lag + span):
+                continue
+            old = lots[signal, col]
+            if old == 0.0:
+                continue
+            notional = abs(old) * unit_old
+            lots[signal, col] = np.sign(old) * np.floor(notional / unit_new)
+
+
+def apply_roll_lot_resize(
+    lots: np.ndarray,
+    codes: np.ndarray,
+    values: np.ndarray,
+    mult: np.ndarray,
+    *,
+    lag: int,
+    holding: int,
+    cohort_holding: np.ndarray | None,
+) -> None:
+    """账户换月：逐换月日调用 ``apply_roll_lot_resize_for_day``（原地修改 lots）。"""
+    if codes is None or len(lots) < 2:
+        return
+    for day in range(1, codes.shape[0]):
+        apply_roll_lot_resize_for_day(
+            lots, day, codes, values, mult,
+            lag=lag, holding=holding, cohort_holding=cohort_holding,
+        )
+
+
+def apply_roll_position_resize_for_day(
+    position: np.ndarray,
+    day: int,
+    codes: np.ndarray,
+    values: np.ndarray,
+    mult: np.ndarray,
+) -> None:
+    """差额调仓路径：换月日按旧名义重算净手数向量。"""
+    if day <= 0:
+        return
+    for col in range(codes.shape[1]):
+        previous_code = codes[day - 1, col]
+        current_code = codes[day, col]
+        if _code_blank(previous_code) or _code_blank(current_code):
+            continue
+        if str(previous_code) == str(current_code):
+            continue
+        lots = float(position[col])
+        if lots == 0.0:
+            continue
+        prev_px = values[day - 1, col]
+        new_px = values[day, col]
+        if not (np.isfinite(prev_px) and np.isfinite(new_px) and new_px != 0):
+            continue
+        unit_old = float(prev_px) * float(mult[col])
+        unit_new = float(new_px) * float(mult[col])
+        notional = abs(lots) * unit_old
+        position[col] = np.sign(lots) * np.floor(notional / unit_new)
