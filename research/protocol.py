@@ -145,7 +145,7 @@ def protocol_metadata(frequency: str = "daily") -> dict[str, Any]:
     if book == "account":
         definition = (
             f"{exec_col} 成交并按名义金额定手，{mark_col} 盯市；"
-            "换月日用 adj_settle 比值剔除价差，价差不进盈亏"
+            "换月日平旧合约盯市后按旧名义在新 settle 上重算手数，价差不进盈亏"
         )
     else:
         definition = (
