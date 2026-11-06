@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 
 from data import pool_symbols
-from factors.signals.external_factor import load_factor_wide, weekly_schedule
+from factors.signals.external_factor import load_factor_wide, monthly_schedule, weekly_schedule
 from backtest.masks import long_short_masks
 
 DATE_COLUMN = "TRADE_DATE"
@@ -75,6 +75,54 @@ def apply_weekly_rebalance(
     最后一周不交易。返回值第三项是每个信号日要持有的交易日数，其余日期为 0。
     """
     schedule = weekly_schedule(long_mask.index)
+    keep = pd.Series(False, index=long_mask.index)
+    holding = pd.Series(0, index=long_mask.index, dtype=int)
+    if not schedule.empty:
+        signal_dates = pd.DatetimeIndex(schedule["signal_date"])
+        keep.loc[signal_dates] = True
+        holding.loc[signal_dates] = schedule["holding_days"].to_numpy()
+    kept_long = long_mask.copy()
+    kept_short = short_mask.copy()
+    kept_long.loc[~keep, :] = False
+    kept_short.loc[~keep, :] = False
+    return kept_long, kept_short, holding
+
+
+def apply_every_n_rebalance(
+    long_mask: pd.DataFrame,
+    short_mask: pd.DataFrame,
+    hold_days: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """每 hold_days 个交易日出一次信号，持有到下一次信号。
+
+    信号日是交易日历上的第 0、N、2N… 日。没有下一次信号的最后一段不新开仓。
+    返回的持有天数是相邻信号日之间的交易日数，供差额调仓使用。
+    """
+    if int(hold_days) < 1:
+        raise ValueError("hold_days 必须至少为 1")
+    step = int(hold_days)
+    dates = pd.DatetimeIndex(long_mask.index)
+    positions = list(range(0, len(dates), step))
+    keep = pd.Series(False, index=dates)
+    holding = pd.Series(0, index=dates, dtype=int)
+    for index, pos in enumerate(positions):
+        if index + 1 >= len(positions) or pos + 1 >= len(dates):
+            break
+        keep.iloc[pos] = True
+        holding.iloc[pos] = int(positions[index + 1] - pos)
+    kept_long = long_mask.copy()
+    kept_short = short_mask.copy()
+    kept_long.loc[~keep, :] = False
+    kept_short.loc[~keep, :] = False
+    return kept_long, kept_short, holding
+
+
+def apply_monthly_rebalance(
+    long_mask: pd.DataFrame,
+    short_mask: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """每个自然月最后一个交易日出信号，持有到下一次信号。"""
+    schedule = monthly_schedule(long_mask.index)
     keep = pd.Series(False, index=long_mask.index)
     holding = pd.Series(0, index=long_mask.index, dtype=int)
     if not schedule.empty:

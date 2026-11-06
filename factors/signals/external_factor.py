@@ -111,6 +111,29 @@ def weekly_schedule(calendar: pd.Series | pd.DatetimeIndex) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
+def monthly_schedule(calendar: pd.Series | pd.DatetimeIndex) -> pd.DataFrame:
+    """每个自然月最后一个交易日出信号，下一个交易日成交，持有到下一次成交。"""
+    days = pd.DatetimeIndex(sorted(pd.to_datetime(pd.Series(calendar)).unique()))
+    frame = pd.DataFrame({"date": days, "position": np.arange(len(days))})
+    frame["month"] = frame["date"].dt.to_period("M")
+    signal = frame.groupby("month", sort=True).tail(1).reset_index(drop=True)
+    holding = signal["position"].shift(-1) - signal["position"]
+    execution = signal["position"] + 1
+    out = pd.DataFrame({
+        "month": signal["month"].astype(str),
+        "signal_date": signal["date"],
+        "execution_date": [
+            days[int(i)] if i < len(days) else pd.NaT for i in execution
+        ],
+        "holding_days": holding,
+    })
+    out = out.dropna(subset=["holding_days", "execution_date"]).copy()
+    out["holding_days"] = out["holding_days"].astype(int)
+    if (out["holding_days"] < 1).any():
+        raise RuntimeError("月频持有天数必须为正")
+    return out.reset_index(drop=True)
+
+
 def weekly_forward_returns(panel: pd.DataFrame, schedule: pd.DataFrame) -> pd.DataFrame:
     """信号日 T 到下一次成交日的收益：``adj_settle[T+1+H] / adj_settle[T+1] - 1``。
 
